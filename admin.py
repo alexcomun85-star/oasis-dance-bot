@@ -95,8 +95,13 @@ def card_kb(order, from_list: str = None):
         rows.append([{"text": "↩️ Вернуть в новые", "callback_data": f"adm_st_{oid}_new"}])
     else:
         rows.append([{"text": "↩️ Вернуть в работу", "callback_data": f"adm_st_{oid}_work"}])
-    rows.append([{"text": "💬 Написать клиенту", "callback_data": f"adm_msg_{oid}"},
-                 {"text": "📲 В календарь", "callback_data": f"adm_ics_{oid}"}])
+    import calendar_ics
+    rows.append([{"text": "💬 Написать клиенту", "callback_data": f"adm_msg_{oid}"}])
+    rows += calendar_ics.calendar_buttons(order)
+    geo = (order.get("data") or {}).get("event_geo")
+    if geo:
+        lat, lon = geo.split(",")
+        rows.append([{"text": "🗺 Площадка на карте", "url": f"https://yandex.ru/maps/?pt={lon},{lat}&z=16&l=map"}])
     if from_list:
         rows.append([{"text": "⬅️ К списку", "callback_data": f"adm_list_{from_list}_0"},
                      {"text": "🗂 Кабинет", "callback_data": "adm_menu"}])
@@ -111,11 +116,12 @@ def notify_new(order_id: int) -> bool:
             logger.warning("ADMIN_CHAT_IDS не задан — заявка №%s никому не отправлена", order_id)
         return False
     ok = False
-    for admin_id in config.ADMIN_CHAT_IDS:
-        r = tg.send_message(admin_id, "🔔 " + card_text(order), card_kb(order))
-        if r and r.get("ok"):
-            ok = True
-            storage.add_order_msg(order_id, admin_id, r["result"]["message_id"])
+    with tg.via("admin"):
+        for admin_id in config.ADMIN_CHAT_IDS:
+            r = tg.send_message(admin_id, "🔔 " + card_text(order), card_kb(order))
+            if r and r.get("ok"):
+                ok = True
+                storage.add_order_msg(order_id, admin_id, r["result"]["message_id"])
     return ok
 
 
@@ -125,9 +131,10 @@ def _refresh_cards(order_id, skip=None):
     for m in storage.get_order_msgs(order_id):
         if skip and (m["admin_id"], m["message_id"]) == skip:
             continue
-        tg.call("editMessageText", {"chat_id": m["admin_id"], "message_id": m["message_id"],
-                                    "text": "🔔 " + card_text(order), "parse_mode": "HTML",
-                                    "reply_markup": card_kb(order)})
+        with tg.via("admin"):
+            tg.call("editMessageText", {"chat_id": m["admin_id"], "message_id": m["message_id"],
+                                        "text": "🔔 " + card_text(order), "parse_mode": "HTML",
+                                        "reply_markup": card_kb(order)})
 
 
 # ---------- экраны кабинета ----------
@@ -317,9 +324,10 @@ def send_to_client(admin_id, text: str):
     if not order:
         tg.send_message(admin_id, "Заявка не найдена.")
         return
-    r = tg.send_message(order["chat_id"],
-                        f"💬 <b>Сообщение от менеджера Oasis Dance</b> (заявка №{oid}):\n\n{html.escape(text)}",
-                        {"inline_keyboard": [[{"text": "↩️ Ответить менеджеру", "callback_data": f"cli_rep_{oid}"}]]})
+    with tg.via("client"):
+        r = tg.send_message(order["chat_id"],
+                            f"💬 <b>Сообщение от менеджера Oasis Dance</b> (заявка №{oid}):\n\n{html.escape(text)}",
+                            {"inline_keyboard": [[{"text": "↩️ Ответить менеджеру", "callback_data": f"cli_rep_{oid}"}]]})
     if r and r.get("ok"):
         if order["status"] == "new":
             storage.set_status(oid, "work")
@@ -360,9 +368,11 @@ def forward_client_reply(chat_id, text: str) -> bool:
         return False
     delivered = False
     for admin_id in config.ADMIN_CHAT_IDS:
-        r = tg.send_message(admin_id, f"💬 <b>Ответ клиента</b> {_who(order)} по заявке №{oid}:\n\n{html.escape(text)}",
-                            {"inline_keyboard": [[{"text": "💬 Ответить", "callback_data": f"adm_msg_{oid}"},
-                                                  {"text": "📄 Заявка", "callback_data": f"adm_open_{oid}_work"}]]})
+        with tg.via("admin"):
+            r = tg.send_message(admin_id, f"💬 <b>Ответ клиента</b> {_who(order)} по заявке №{oid}:\n\n"
+                                          f"{html.escape(text)}",
+                                {"inline_keyboard": [[{"text": "💬 Ответить", "callback_data": f"adm_msg_{oid}"},
+                                                      {"text": "📄 Заявка", "callback_data": f"adm_open_{oid}_work"}]]})
         delivered = delivered or bool(r and r.get("ok"))
     return delivered
 
@@ -438,8 +448,8 @@ def calendar_screen():
                      f"{', ' + html.escape(who) if who else ''}{', ' + html.escape(place[:30]) if place else ''}")
         if len(rows) < 8:
             rows.append([{"text": f"{day:%d.%m} · №{o['id']} · {what}"[:40], "callback_data": f"adm_open_{o['id']}_work"}])
-    rows.append([{"text": "📲 Подключить календарь телефона", "callback_data": "adm_calsub"}])
-    rows.append([{"text": "📥 Все выступления файлом .ics", "callback_data": "adm_calall"}])
+    rows.append([{"text": "📥 Все выступления — в календарь телефона", "callback_data": "adm_calall"}])
+    rows.append([{"text": "🔄 Автообновление (подписка по ссылке)", "callback_data": "adm_calsub"}])
     return "\n".join(lines), {"inline_keyboard": rows}
 
 
@@ -462,8 +472,8 @@ def calendar_subscribe_screen():
             "<b>Android (Google Календарь):</b> на компьютере откройте calendar.google.com → слева «Другие "
             "календари» → «+» → «Добавить по URL» → вставьте ссылку. Через несколько минут календарь "
             "появится в приложении на телефоне (включите его в настройках приложения).\n\n"
-            "Google обновляет подписные календари не сразу (до нескольких часов). Чтобы выступление "
-            "появилось мгновенно, нажмите в карточке заявки «📲 В календарь»." + seen)
+            "Подписка обновляется не сразу (Google — до нескольких часов). Чтобы выступление появилось "
+            "мгновенно, нажмите в карточке заявки «📅 Google Календарь» или «🍏 Календарь iPhone»." + seen)
     return text, {"inline_keyboard": [
         [{"text": "🔄 Выдать новую ссылку (старая перестанет работать)", "callback_data": "adm_calreset"}],
         [{"text": "⬅️ Календарь", "callback_data": "adm_cal"}]]}
@@ -475,11 +485,12 @@ def send_order_ics(chat_id, oid, for_client=False) -> bool:
     if not order or not calendar_ics.parse_date(order["data"].get("event_date")):
         tg.send_message(chat_id, "У этой заявки нет точной даты — добавить в календарь нельзя.")
         return False
-    data = calendar_ics.build_ics([order], name="Oasis Dance", with_phone=not for_client)
+    data = calendar_ics.build_ics([order], name="Oasis Dance", with_phone=not for_client, for_client=for_client)
     when = order["data"]["event_date"].replace(".", "-")
     caption = ("📅 Нажмите на файл, чтобы добавить выступление в календарь телефона."
                if for_client else f"📅 Заявка №{oid}: нажмите на файл — событие добавится в календарь.")
-    r = tg.send_document(chat_id, f"oasis-dance-{when}.ics", data, caption)
+    with tg.via("client" if for_client else "admin"):
+        r = tg.send_document(chat_id, f"oasis-dance-{when}.ics", data, caption)
     return bool(r and r.get("ok"))
 
 
@@ -492,12 +503,12 @@ def notify_client_in_work(oid):
     order["data"]["work_notified"] = True
     storage._q("UPDATE orders SET data=? WHERE id=?", (json.dumps(order["data"], ensure_ascii=False), oid),
                commit=True)
-    rows = []
-    if calendar_ics.parse_date(order["data"].get("event_date")):
-        rows.append([{"text": "📅 Добавить в мой календарь", "callback_data": f"cal_my_{oid}"}])
-    tg.send_message(order["chat_id"], f"✅ Ваша заявка №{oid} принята в работу. "
-                                      "Менеджер свяжется с вами, чтобы обсудить детали.",
-                    {"inline_keyboard": rows} if rows else None)
+    rows = calendar_ics.calendar_buttons(order, for_client=True)
+    with tg.via("client"):
+        tg.send_message(order["chat_id"], f"✅ Ваша заявка №{oid} принята в работу. "
+                                          "Менеджер свяжется с вами, чтобы обсудить детали."
+                                          + ("\n\nДобавьте выступление в календарь телефона 👇" if rows else ""),
+                        {"inline_keyboard": rows} if rows else None)
 
 
 # ---------- настройки менеджера ----------

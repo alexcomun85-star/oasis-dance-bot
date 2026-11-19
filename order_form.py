@@ -9,6 +9,7 @@ from datetime import date, datetime
 
 import admin
 import config
+import geo
 import storage
 import ui
 
@@ -17,20 +18,28 @@ MONTHS = ["Январь", "Февраль", "Март", "Апрель", "Май"
 
 # Шаги: ключ, название в сводке, вопрос
 STEPS = [
-    ("event_type", "Мероприятие", "🎉 <b>Шаг 1.</b> Какое у вас мероприятие?\nВыберите или напишите своё."),
-    ("event_date", "Дата", "📅 <b>Шаг 2.</b> Выберите дату мероприятия."),
-    ("event_location", "Место", "📍 <b>Шаг 3.</b> Где пройдёт мероприятие?\nНапишите город и площадку (можно кратко)."),
-    ("program", "Программа", "💃 <b>Шаг 4.</b> Какая программа интересует?"),
-    ("contact_phone", "Телефон", "📱 <b>Шаг 5.</b> Как с вами связаться?\n"
+    ("event_type", "Мероприятие", "🎉 <b>Шаг 1 из 7.</b> Какое у вас мероприятие?\nВыберите или напишите своё."),
+    ("event_date", "Дата", "📅 <b>Шаг 2 из 7.</b> Выберите дату мероприятия."),
+    ("event_time", "Время", "⏰ <b>Шаг 3 из 7.</b> Во сколько начало выступления?\n"
+                            "Выберите или напишите, например 19:30."),
+    ("event_location", "Место", "📍 <b>Шаг 4 из 7.</b> Где пройдёт мероприятие?\n"
+                                "Напишите название площадки или адрес — найду на карте.\n"
+                                "Или нажмите «📍 Отправить геолокацию» внизу экрана."),
+    ("program", "Программа", "💃 <b>Шаг 5 из 7.</b> Какая программа интересует?"),
+    ("contact_phone", "Телефон", "📱 <b>Шаг 6 из 7.</b> Как с вами связаться?\n"
                                  "Нажмите кнопку «Отправить номер» внизу экрана или напишите номер."),
-    ("comment", "Пожелания", "✍️ <b>Шаг 6.</b> Есть пожелания? Напишите их или нажмите «Пропустить»."),
+    ("comment", "Пожелания", "✍️ <b>Шаг 7 из 7.</b> Есть пожелания? Напишите их или нажмите «Пропустить»."),
 ]
 KEYS = [s[0] for s in STEPS]
 CONTACT_STEP = KEYS.index("contact_phone")
+LOCATION_STEP = KEYS.index("event_location")
+REPLY_KB_STEPS = {CONTACT_STEP, LOCATION_STEP}  # шаги с кнопками внизу экрана (номер, геолокация)
 
 OPTIONS = {
     "event_type": ["Свадьба", "Корпоратив", "День рождения", "Юбилей", "Выпускной",
                    "Открытие / презентация", "Частный праздник", "Другое"],
+    "event_time": ["12:00", "14:00", "16:00", "17:00", "18:00", "19:00", "20:00", "21:00",
+                   "22:00", "23:00", "Пока не знаю"],
     "program": ["Стандартная (2–3 номера)", "Расширенная (4–5 номеров)",
                 "Индивидуальная программа", "Пока не знаю — помогите выбрать"],
 }
@@ -66,9 +75,10 @@ def _options_kb(step):
     key = KEYS[step]
     opts = OPTIONS[key]
     rows, row = [], []
+    per_row = 4 if key == "event_time" else 2
     for i, opt in enumerate(opts):
         row.append({"text": opt, "callback_data": f"of_opt_{i}"})
-        if len(row) == 2 or len(opt) > 14:
+        if len(row) == per_row or len(opt) > 14:
             rows.append(row)
             row = []
     if row:
@@ -104,6 +114,16 @@ def calendar_kb(year: int, month: int, step: int = 0, prefix: str = "of"):
     else:
         rows.append(ui.home_row())
     return {"inline_keyboard": rows}
+
+
+BTN_SEND_GEO = "📍 Отправить геолокацию"
+
+
+def location_kb():
+    return {"keyboard": [[{"text": BTN_SEND_GEO, "request_location": True}],
+                         [{"text": BTN_BACK}, {"text": BTN_CANCEL}]],
+            "resize_keyboard": True, "one_time_keyboard": False,
+            "input_field_placeholder": "Название площадки или адрес"}
 
 
 def contact_kb():
@@ -151,6 +171,8 @@ def _ask(form, prefix=""):
         return [(text, calendar_kb(t.year, t.month, step))]
     if key == "contact_phone":
         return [(text + consent_line(), contact_kb())]
+    if key == "event_location":
+        return [(text, location_kb())]
     if key == "comment":
         return [(text, {"inline_keyboard": [[{"text": "Пропустить ➡️", "callback_data": "of_skip"}], _nav(step)]})]
     return [(text, {"inline_keyboard": [_nav(step)]})]
@@ -163,13 +185,14 @@ def _skip_preset(form):
 
 
 def _advance(chat_id, form, key, value):
-    leaving_contact = form["step"] == CONTACT_STEP
+    leaving_reply_step = form["step"] in REPLY_KB_STEPS
     form["data"][key] = value
     form["step"] += 1
     _skip_preset(form)
     storage.save_form(chat_id, form)
     msgs = _ask(form, "✅ Принято.\n\n")
-    if leaving_contact:
+    # Если следующий шаг тоже с кнопками внизу — его клавиатура сама заменит текущую
+    if leaving_reply_step and form["step"] not in REPLY_KB_STEPS:
         msgs.insert(0, ("Спасибо! 👍", REMOVE_KB))
     return msgs
 
@@ -249,6 +272,15 @@ def process_text(chat_id, text: str):
                      "например +7 900 123-45-67.", contact_kb())]
         return _advance(chat_id, form, key, phone)
 
+    if key == "event_time":
+        t = t.replace(".", ":")
+        if re.fullmatch(r"\d{1,2}", t) and int(t) < 24:
+            t = f"{int(t):02d}:00"
+        return _advance(chat_id, form, key, t[:40])
+
+    if key == "event_location":
+        return _location_results(chat_id, form, t)
+
     if key == "event_date":
         try:
             d = datetime.strptime(t, "%d.%m.%Y").date()
@@ -258,6 +290,44 @@ def process_text(chat_id, text: str):
         except ValueError:
             pass  # свободный ответ вроде «в середине июня» тоже принимаем
     return _advance(chat_id, form, key, t[:300])
+
+
+# ---------- поиск площадки ----------
+
+def _location_results(chat_id, form, query: str):
+    found, by_ai = geo.search_smart(query)
+    form["data"]["_loc_q"] = query[:200]
+    form["data"]["_loc_c"] = found[:5]
+    storage.save_form(chat_id, form)
+    raw_btn = [{"text": "✍️ Оставить как написал", "callback_data": "of_loc_raw"}]
+    if not found:
+        return [(f"🔎 Не нашёл на карте «{html.escape(query[:60])}».\n\n"
+                 "Можно оставить как написали — менеджер уточнит. Или напишите точнее: название и город, "
+                 "либо улицу и дом.", {"inline_keyboard": [raw_btn]})]
+    rows = [[{"text": "📍 " + c["label"][:60], "callback_data": f"of_loc_{i}"}] for i, c in enumerate(found[:5])]
+    rows.append(raw_btn)
+    note = " (с помощью ИИ)" if by_ai else ""
+    return [(f"🔎 Нашёл на карте{note} — выберите вашу площадку.\n"
+             "Нет нужной? Напишите точнее: название и город, либо улицу и дом.", {"inline_keyboard": rows})]
+
+
+def _choose_location(chat_id, form, label, lat=None, lon=None):
+    if lat is not None:
+        form["data"]["event_geo"] = f"{lat:.6f},{lon:.6f}"
+    else:
+        form["data"].pop("event_geo", None)
+    form["data"].pop("_loc_c", None)
+    form["data"].pop("_loc_q", None)
+    return _advance(chat_id, form, "event_location", label)
+
+
+def process_location(chat_id, location: dict):
+    """Геолокация, отправленная кнопкой. None — если форма её не ждёт."""
+    form = storage.get_form(chat_id)
+    if not form or form["step"] != LOCATION_STEP:
+        return None
+    lat, lon = location.get("latitude"), location.get("longitude")
+    return _choose_location(chat_id, form, geo.reverse(lat, lon), lat, lon)
 
 
 def process_contact(chat_id, contact: dict):
@@ -274,11 +344,11 @@ def go_back(chat_id):
     form = storage.get_form(chat_id)
     if not form:
         return [("Заявка не найдена.", MENU_KB)]
-    was_contact = form["step"] == CONTACT_STEP
+    was_reply_step = form["step"] in REPLY_KB_STEPS
     form["step"] = max(0, form["step"] - 1)
     storage.save_form(chat_id, form)
     msgs = _ask(form, "⬅️ Вернулись назад.\n\n")
-    if was_contact:
+    if was_reply_step and form["step"] not in REPLY_KB_STEPS:
         msgs.insert(0, ("Хорошо.", REMOVE_KB))
     return msgs
 
@@ -321,12 +391,22 @@ def handle_callback(chat_id, data: str, user: dict):
         return _advance(chat_id, form, key, d.strftime("%d.%m.%Y"))
     if data == "of_nodate" and key == "event_date":
         return _advance(chat_id, form, key, "пока не известна")
+    if data.startswith("of_loc_") and key == "event_location":
+        if data == "of_loc_raw":
+            return _choose_location(chat_id, form, form["data"].get("_loc_q") or "уточнить у клиента")
+        cands = form["data"].get("_loc_c") or []
+        try:
+            c = cands[int(data[7:])]
+        except (ValueError, IndexError):
+            return _ask(form)
+        return _choose_location(chat_id, form, c["label"], c["lat"], c["lon"])
     if data == "of_skip" and key == "comment":
         return _advance(chat_id, form, key, "—")
     return _ask(form)
 
 
 def submit(chat_id, form):
+    form["data"] = {k: v for k, v in form["data"].items() if not k.startswith("_")}
     if storage.too_many_submits(chat_id):
         return LIMIT_MSG
     order_id = storage.add_order(chat_id, "form", form["user"], form["data"])

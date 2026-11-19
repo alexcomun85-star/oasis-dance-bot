@@ -53,6 +53,13 @@ MANAGER_REPLY_KB = {
     "input_field_placeholder": "Меню менеджера",
 }
 
+def manager_kb(split: bool):
+    """Меню менеджера; в отдельном боте менеджера кнопка «Как видит клиент» не нужна."""
+    if not split:
+        return MANAGER_REPLY_KB
+    return {**MANAGER_REPLY_KB, "keyboard": MANAGER_REPLY_KB["keyboard"][:-1]}
+
+
 # Клиентское меню, которое видит менеджер в режиме проверки, — с кнопкой возврата
 CLIENT_PREVIEW_KB = {**MAIN_REPLY_KB,
                      "keyboard": MAIN_REPLY_KB["keyboard"] + [[{"text": BTN_TO_MANAGER}]]}

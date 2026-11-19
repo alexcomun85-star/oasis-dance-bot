@@ -24,6 +24,9 @@ _load_env_file()
 
 # --- Telegram ---
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+# Отдельный бот для менеджера (необязательно): у менеджера свой чат, не пересекающийся с клиентским
+ADMIN_BOT_TOKEN = os.environ.get("ADMIN_BOT_TOKEN", "")
+ADMIN_BOT_USERNAME = ""  # уточняется при запуске
 
 # Числовые ID администраторов через запятую (узнать свой ID: написать боту @userinfobot)
 ADMIN_CHAT_IDS = [

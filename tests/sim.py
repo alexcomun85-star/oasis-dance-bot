@@ -16,7 +16,8 @@ _mid = [100]
 
 
 def fake(method, params=None, timeout=15):
-    params = params or {}
+    params = dict(params or {})
+    params["_via"] = tg.current()
     sent.append((method, params))
     kb = params.get("reply_markup") or {}
     for row in kb.get("inline_keyboard", []):
@@ -43,6 +44,15 @@ def fake_doc(chat_id, filename, data, caption=""):
 tg.send_photo = fake_photo
 tg.send_document = fake_doc
 import admin, ai, bot, channel, config, order_form, storage  # noqa: E402,E401
+import geo  # noqa: E402
+def _fake_search(q):
+    if "нет такого" in q.lower():
+        return [], False
+    return [{"label": q.split(",")[0] + ", Санкт-Петербург", "lat": 59.93, "lon": 30.31},
+            {"label": q.split(",")[0] + " (другой)", "lat": 59.9, "lon": 30.2}], False
+_geo_smart, _geo_search, _geo_get = geo.search_smart, geo.search, geo._get
+geo.search_smart = _fake_search
+geo.reverse = lambda lat, lon: "Невский проспект 1, Санкт-Петербург"
 
 # Зависший Gemini: одна попытка с таймаутом, без ожидания запасной модели
 import requests as _rq  # noqa: E402
@@ -146,13 +156,19 @@ nxt = date.today().replace(day=1) + timedelta(days=40)
 cb(f"of_cal_{nxt.year}-{nxt.month:02d}")         # листаем календарь
 d = nxt.replace(day=15)
 cb(f"of_day_{d:%Y-%m-%d}")
-assert "Шаг 3" in last()["text"]
-msg("Москва, ресторан «Арбат»")
+assert "Шаг 3" in last()["text"] and "of_opt_5" in buttons(last())   # время
+msg("19.30")
+assert "Шаг 4" in last()["text"] and last()["reply_markup"]["keyboard"][0][0]["request_location"]
+msg("Нет такого места")
+assert "Не нашёл" in last()["text"] and "of_loc_raw" in buttons(last())
+msg("Ресторан Арбат, Москва")
+assert "of_loc_0" in buttons(last()) and "Ресторан Арбат, Санкт-Петербург" in str(last()["reply_markup"])
+cb("of_loc_0")
 cb("of_opt_3")                                   # программа «помогите выбрать»
-assert "Шаг 5" in last()["text"] and last()["reply_markup"]["keyboard"][0][0]["request_contact"]
+assert "Шаг 6" in last()["text"] and last()["reply_markup"]["keyboard"][0][0]["request_contact"]
 msg("", contact={"phone_number": "+79990001122", "first_name": "Аня"})
 assert out(5)[-2]["reply_markup"].get("is_persistent"), "после номера возвращается нижнее меню"
-assert "Шаг 6" in last()["text"]
+assert "Шаг 7" in last()["text"]
 cb("of_skip")
 assert "Проверьте заявку" in last()["text"] and "персональных" in last()["text"]
 cb("of_confirm")
@@ -205,7 +221,9 @@ cb("order", C)
 cb("of_continue", C)
 assert "Шаг 2" in last(7)["text"]
 cb("of_nodate", C)
+cb("of_opt_10", C)                                   # время: пока не знаю
 msg("Казань", C)
+cb("of_loc_raw", C)
 cb("of_opt_0", C)
 msg("✉️ Лучше написать в Telegram", C)
 msg("Нужна программа на 20 минут", C)
@@ -507,7 +525,8 @@ cb("of_cancel", F)
 cb(f"adm_df_{oid}_0", A)                              # повторный ответ не ломает
 
 # отзыв после выступления
-cb("order", F); cb("of_opt_0", F); cb("of_nodate", F); msg("СПб", F); cb("of_opt_0", F)
+cb("order", F); cb("of_opt_0", F); cb("of_nodate", F); cb("of_opt_5", F); msg("СПб", F); cb("of_loc_0", F)
+cb("of_opt_0", F)
 msg("+7 911 000 00 00", F); cb("of_skip", F); cb("of_confirm", F)
 fo = storage.list_orders(["new"])[0]
 assert fo["chat_id"] == 20 and fo["kind"] == "form"
@@ -567,16 +586,27 @@ import calendar_ics  # noqa: E402
 G = {"id": 30, "first_name": "Галя"}
 storage._q("DELETE FROM events WHERE chat_id=30", commit=True)
 dg = date.today() + timedelta(days=10)
-cb("order", G); cb("of_opt_1", G); cb(f"of_day_{dg:%Y-%m-%d}", G); msg("Москва, Ритц", G); cb("of_opt_0", G)
+cb("order", G); cb("of_opt_1", G); cb(f"of_day_{dg:%Y-%m-%d}", G); cb("of_opt_5", G)
+bot.on_message({"chat": {"id": 30, "type": "private"}, "from": G, "location": {"latitude": 59.93, "longitude": 30.36}})
+assert "Шаг 5" in last(30)["text"]
+cb("of_opt_0", G)
 msg("+7 900 111 22 33", G); cb("of_skip", G); cb("of_confirm", G)
 go = [o for o in storage.list_orders(["new"]) if o["chat_id"] == 30][0]
 cb(f"adm_st_{go['id']}_work", A)
 assert "принята в работу" in last(30)["text"] and f"cal_my_{go['id']}" in buttons(last(30))
+gurl = last(30)["reply_markup"]["inline_keyboard"][0][0]["url"]
+assert gurl.startswith("https://calendar.google.com/calendar/render?action=TEMPLATE") and "T160000Z" in gurl
+assert "%2B7+900" not in gurl, "в событии клиента нет его телефона"
+acard = [p for m, p in sent if m == "editMessageText" and p.get("chat_id") == 111][-1]
+aurl = [b.get("url") for r in acard["reply_markup"]["inline_keyboard"] for b in r if "google" in (b.get("url") or "")][0]
+assert "%2B7+900+111+22+33" in aurl and "yandex.ru%2Fmaps" in aurl, "менеджеру — телефон и карта"
+assert any("yandex.ru/maps" in (b.get("url") or "") for r in acard["reply_markup"]["inline_keyboard"] for b in r)
 n = len(sent)
 cb(f"cal_my_{go['id']}", G)
 doc = [p for m, p in sent[n:] if m == "sendDocument"][0]
 ics = doc["data"].decode()
-assert doc["chat_id"] == 30 and "BEGIN:VCALENDAR" in ics and f"DTSTART;VALUE=DATE:{dg:%Y%m%d}" in ics
+assert doc["chat_id"] == 30 and "BEGIN:VCALENDAR" in ics and f"DTSTART:{dg:%Y%m%d}T160000Z" in ics, ics
+assert "@EbruBekker" in ics.replace("\r\n ", ""), "клиенту — контакт менеджера"
 assert "+7 900 111" not in ics, "в файле клиента нет телефона"
 n = len(sent)
 cb(f"cal_my_{go['id']}", F)                            # чужая заявка
@@ -615,4 +645,67 @@ assert f"№{go['id']}" in last(111)["text"]
 n = len(sent)
 msg(f"/start o_{go['id']}", G)
 assert f"Заявка на выступление №{go['id']}" not in str(sent[n:])
+
+# --- два бота: клиентский и бот менеджера — чаты не пересекаются
+config.ADMIN_BOT_TOKEN = "999:ADMINTOKEN"
+tg._TOKENS["admin"] = config.ADMIN_BOT_TOKEN
+assert tg.split_mode()
+def upd(u, text, botname, **extra):
+    m = {"chat": {"id": u["id"], "type": "private"}, "from": u, "text": text, "message_id": 1}
+    m.update(extra)
+    bot.handle_update({"message": m}, botname)
+n = len(sent)
+upd(A, "/start", "client")                            # в клиентском боте менеджер — обычный клиент
+ph = [p for m, p in sent[n:] if m == "sendPhoto"]
+assert ph and "Вернуться в меню менеджера" not in str(ph[-1]["reply_markup"])
+upd(A, ui.ABTN_ORDERS, "client")
+assert "Кабинет заявок" not in str([p for m, p in sent[n:] if p.get("_via") == "client"])
+n = len(sent)
+upd(A, "/start", "admin")
+w = [p for m, p in sent[n:] if m == "sendMessage"][-1]
+assert w["_via"] == "admin" and "Меню менеджера" in w["text"]
+assert "Как видит клиент" not in str(w["reply_markup"]), "в отдельном боте переключатель не нужен"
+n = len(sent)
+upd(F, "/start", "admin")                             # посторонний в боте менеджера
+assert "служебный бот" in [p for m, p in sent[n:]][-1]["text"]
+storage._q("DELETE FROM events WHERE chat_id=6", commit=True)
+n = len(sent)
+upd(B, "/callme", "client"); upd(B, "+7 921 555 00 00", "client")
+card = [p for m, p in sent[n:] if p.get("chat_id") == 111 and "Просьба перезвонить" in p.get("text", "")]
+assert card and card[0]["_via"] == "admin", "заявка приходит в бот менеджера"
+assert all(p["_via"] == "client" for m, p in sent[n:] if p.get("chat_id") == 6), "клиенту — из клиентского бота"
+oid_b = int([b for b in buttons(card[0]) if b.startswith("adm_msg_")][0].split("_")[2])
+bot.handle_update({"callback_query": {"id": "z1", "from": A, "data": f"adm_msg_{oid_b}",
+                                      "message": {"chat": {"id": 111, "type": "private"}, "message_id": 5}}}, "admin")
+n = len(sent)
+upd(A, "Перезвоню через 10 минут", "admin")
+to_b = [p for m, p in sent[n:] if p.get("chat_id") == 6]
+assert to_b and to_b[0]["_via"] == "client", "ответ менеджера клиенту идёт из клиентского бота"
+setup_n = len(sent)
+bot.setup_profile()
+cmds = [(p["_via"], p.get("scope", {}).get("type")) for m, p in sent[setup_n:] if m == "setMyCommands"]
+assert ("client", "all_private_chats") in cmds and ("admin", "all_private_chats") in cmds
+assert any(m == "deleteMyCommands" for m, p in sent[setup_n:])
+config.ADMIN_BOT_TOKEN = ""
+tg._TOKENS["admin"] = config.TELEGRAM_BOT_TOKEN
+
+# --- поиск площадки: OpenStreetMap и подсказка ИИ (сеть заменена заглушкой)
+calls_geo = []
+def _osm(url, params):
+    calls_geo.append(params.get("q"))
+    if params.get("q") == "Палкинъ, Невский проспект 47, Санкт-Петербург":
+        return [{"name": "Палкинъ", "lat": "59.93", "lon": "30.35",
+                 "address": {"road": "Невский проспект", "house_number": "47", "city": "Санкт-Петербург"}}]
+    return []
+geo._get = _osm
+geo.search = _geo_search
+_orig_call = ai._call
+ai._call = lambda *a, **k: "Палкинъ, Невский проспект 47, Санкт-Петербург"
+found, by_ai = _geo_smart("ресторан палкин")
+assert by_ai and found[0]["label"] == "Палкинъ, Невский проспект 47, Санкт-Петербург", found
+assert calls_geo == ["ресторан палкин", "Палкинъ, Невский проспект 47, Санкт-Петербург"]
+ai._call = lambda *a, **k: "Несуществующий дворец, Санкт-Петербург"
+found, by_ai = _geo_smart("дворец мечты")
+assert found == [], "выдуманный ИИ адрес без подтверждения картой не принимается"
+ai._call = _orig_call
 print("OK, вызовов API:", len(sent))

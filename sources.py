@@ -292,6 +292,11 @@ def check_feed(url, backfill=0):
 def check_all():
     if not _check_lock.acquire(blocking=False):
         return
+    with tg.via("admin"):
+        _check_all()
+
+
+def _check_all():
     try:
         total, errors = 0, []
         for src in (config.VK_SOURCES if config.VK_SERVICE_TOKEN else []):

@@ -29,8 +29,8 @@ logger = logging.getLogger("oasis")
 class _RedactSecrets(logging.Filter):
     """Убирает токен бота и ключ Gemini из любых строк журнала (сетевые ошибки содержат адрес запроса)."""
     def filter(self, record):
-        secrets = [s for s in (config.TELEGRAM_BOT_TOKEN, config.GEMINI_API_KEY, config.VK_SERVICE_TOKEN,
-                               config.AI_FALLBACK_KEY) if s]
+        secrets = [s for s in (config.TELEGRAM_BOT_TOKEN, config.ADMIN_BOT_TOKEN, config.GEMINI_API_KEY,
+                               config.VK_SERVICE_TOKEN, config.AI_FALLBACK_KEY) if s]
         if secrets:
             msg = record.getMessage()
             for secret in secrets:
@@ -128,14 +128,21 @@ def send_welcome(chat_id, user, kb=None):
 
 # ---------- режим менеджера ----------
 
+def staff(chat_id) -> bool:
+    """Менеджер в своём интерфейсе. При отдельном боте менеджера в клиентском боте он — обычный клиент."""
+    return admin.is_admin(chat_id) and (not tg.split_mode() or tg.current() == "admin")
+
+
 def manager_mode(chat_id) -> bool:
-    """Администратор по умолчанию видит меню менеджера; клиентское — только в режиме просмотра."""
-    return admin.is_admin(chat_id) and storage.get_setting(f"mode_{chat_id}", "manager") == "manager"
+    """Администратор видит меню менеджера; клиентское — только в режиме просмотра (если бот один)."""
+    if not staff(chat_id):
+        return False
+    return tg.split_mode() or storage.get_setting(f"mode_{chat_id}", "manager") == "manager"
 
 
 def to_manager(chat_id, user):
     storage.set_setting(f"mode_{chat_id}", "manager")
-    tg.send_message(chat_id, admin.manager_welcome(user), ui.MANAGER_REPLY_KB)
+    tg.send_message(chat_id, admin.manager_welcome(user), ui.manager_kb(tg.split_mode()))
 
 
 def to_client_preview(chat_id, user):
@@ -157,7 +164,8 @@ def manager_button(chat_id, text):
 
 MANAGER_HINT = ("Это меню менеджера: здесь заявки, календарь, посты и настройки — кнопки внизу экрана.\n\n"
                 "• Перешлите сюда любой пост — подготовлю его для канала.\n"
-                "• Проверить, как бот отвечает клиентам, — «👀 Как видит клиент».")
+                "• Проверить, как бот отвечает клиентам, — откройте клиентского бота "
+                "(или «👀 Как видит клиент», если бот один).")
 
 
 def start_screen(chat_id, user):
@@ -349,12 +357,12 @@ def on_command(chat_id, user, cmd):
         channel.cancel(chat_id)
         if manager_mode(chat_id):
             to_manager(chat_id, user)
-        elif admin.is_admin(chat_id):
+        elif staff(chat_id):
             send_welcome(chat_id, user, ui.CLIENT_PREVIEW_KB)
         else:
             send_welcome(chat_id, user)
         return []
-    if cmd == "/manager" and admin.is_admin(chat_id):
+    if cmd == "/manager" and staff(chat_id):
         to_manager(chat_id, user)
         return []
     if manager_mode(chat_id) and cmd in ("/order", "/date", "/numbers", "/callme", "/ask", "/oasis",
@@ -390,7 +398,7 @@ def on_command(chat_id, user, cmd):
                                        {"text": "Нет", "callback_data": "main_menu"}]]})]
     if cmd == "/myid":
         return [(f"Ваш Telegram ID: <code>{chat_id}</code>", None)]
-    if admin.is_admin(chat_id):
+    if staff(chat_id):
         if cmd == "/admin":
             return [admin.menu_screen()]
         if cmd == "/orders":
@@ -401,6 +409,10 @@ def on_command(chat_id, user, cmd):
             return [channel.start(chat_id)]
         if cmd == "/status":
             return [admin.status_screen()]
+        if cmd == "/calendar":
+            return [admin.calendar_screen()]
+        if cmd == "/settings":
+            return [admin.settings_screen()]
         if cmd == "/export":
             extras.export_orders(chat_id)
             return []
@@ -420,14 +432,24 @@ def on_message(msg):
         return
     chat_id = chat["id"]
     user = msg.get("from", {})
+    if tg.split_mode() and tg.current() == "admin" and not admin.is_admin(chat_id):
+        tg.send_message(chat_id, "Это служебный бот шоу-балета Oasis Dance. Чтобы заказать шоу, "
+                                 f"откройте @{config.BOT_USERNAME}.")
+        return
     storage.touch_user(user)
 
     # Администратор готовит пост в канал (принимаем и фото, и видео)
-    if admin.is_admin(chat_id) and channel.active(chat_id) and channel.on_message(chat_id, msg):
+    if staff(chat_id) and channel.active(chat_id) and channel.on_message(chat_id, msg):
         return
     # Администратор переслал пост — готовим черновик для канала
-    if (admin.is_admin(chat_id) and msg.get("forward_origin") and not admin.awaiting_reply(chat_id)
+    if (staff(chat_id) and msg.get("forward_origin") and not admin.awaiting_reply(chat_id)
             and sources.from_forward(chat_id, msg)):
+        return
+
+    # Геолокация площадки
+    if msg.get("location"):
+        res = order_form.process_location(chat_id, msg["location"])
+        render(chat_id, res or [("Спасибо! Геолокация пригодится в заявке — нажмите «🎭 Заказать шоу».", None)])
         return
 
     # Номер, отправленный кнопкой
@@ -453,7 +475,7 @@ def on_message(msg):
         cmd = text.split()[0].split("@")[0].lower()
         if cmd == "/start" and len(text.split()) > 1:
             payload = text.split()[1][:20]
-            if payload.startswith("o_") and admin.is_admin(chat_id) and payload[2:].isdigit():
+            if payload.startswith("o_") and staff(chat_id) and payload[2:].isdigit():
                 res = admin.handle_callback(chat_id, None, f"adm_open_{payload[2:]}_work")
                 if res:
                     tg.send_message(chat_id, *res)
@@ -468,7 +490,7 @@ def on_message(msg):
         return
 
     # Администратор пишет ответ клиенту
-    if admin.is_admin(chat_id) and admin.awaiting_reply(chat_id):
+    if staff(chat_id) and admin.awaiting_reply(chat_id):
         admin.send_to_client(chat_id, text)
         return
     # Клиент отвечает менеджеру
@@ -480,8 +502,8 @@ def on_message(msg):
                               back_kb(manager_row()))])
         return
     # Администратор: переключение режимов и меню менеджера (клиентский интерфейс сюда не попадает)
-    if admin.is_admin(chat_id):
-        if text == ui.ABTN_TO_CLIENT:
+    if staff(chat_id):
+        if text == ui.ABTN_TO_CLIENT and not tg.split_mode():
             to_client_preview(chat_id, user)
             return
         if text == ui.BTN_TO_MANAGER:
@@ -491,7 +513,7 @@ def on_message(msg):
             if text in ui.ADMIN_BUTTONS:
                 manager_button(chat_id, text)
             else:
-                tg.send_message(chat_id, MANAGER_HINT, ui.MANAGER_REPLY_KB)
+                tg.send_message(chat_id, MANAGER_HINT, ui.manager_kb(tg.split_mode()))
             return
 
     # Кнопки нижнего меню работают всегда (незаконченная заявка сохраняется)
@@ -583,10 +605,13 @@ def on_callback(cq):
     if not chat_id or (msg.get("chat") or {}).get("type") != "private" or chat_id != user.get("id"):
         tg.answer_callback(cq["id"])
         return
+    if tg.split_mode() and tg.current() == "admin" and not admin.is_admin(chat_id):
+        tg.answer_callback(cq["id"])
+        return
     storage.touch_user(user)
 
     if data.startswith("adm_"):
-        if not admin.is_admin(chat_id):
+        if not staff(chat_id):
             tg.answer_callback(cq["id"], "Недоступно")
             return
         tg.answer_callback(cq["id"])
@@ -596,7 +621,7 @@ def on_callback(cq):
         return
 
     if data.startswith("ch_"):
-        if not admin.is_admin(chat_id):
+        if not staff(chat_id):
             tg.answer_callback(cq["id"], "Недоступно")
             return
         tg.answer_callback(cq["id"])
@@ -606,7 +631,7 @@ def on_callback(cq):
         return
 
     if data.startswith(("dr_", "src_")):
-        if not admin.is_admin(chat_id):
+        if not staff(chat_id):
             tg.answer_callback(cq["id"], "Недоступно")
             return
         if data == "dr_noop":
@@ -655,26 +680,45 @@ def on_callback(cq):
 # ---------- профиль бота в Telegram ----------
 
 USER_COMMANDS = [
-    ("start", "Главное меню"), ("order", "Заказать шоу"), ("date", "Свободна ли дата?"),
-    ("numbers", "Номера и видео"), ("callme", "Перезвоните мне"), ("contact", "Контакты"),
-    ("privacy", "Персональные данные"), ("help", "Помощь"),
+    ("start", "🏠 Главное меню"), ("order", "🎭 Заказать шоу"), ("date", "📅 Свободна ли дата?"),
+    ("numbers", "💃 Номера и видео"), ("callme", "📞 Перезвоните мне"), ("help", "❓ Помощь и контакты"),
 ]
-ADMIN_COMMANDS = USER_COMMANDS + [("admin", "Кабинет заявок"), ("orders", "Новые заявки"),
-                                  ("stats", "Статистика"), ("post", "Пост в канал"),
-                                  ("sources", "Соцсети → канал"), ("status", "Что подключено"),
-                                  ("export", "Заявки в Excel"), ("manager", "Меню менеджера")]
+MANAGER_COMMANDS = [
+    ("start", "🧑‍💼 Меню менеджера"), ("orders", "📥 Новые заявки"), ("calendar", "📅 Календарь"),
+    ("post", "📢 Пост в канал"), ("stats", "📊 Статистика"), ("settings", "⚙️ Настройки"),
+]
+ADMIN_COMMANDS = MANAGER_COMMANDS + [("manager", "🔁 Вернуться в меню менеджера")]
 DESCRIPTION = ("Шоу-балет Oasis Dance — шоу-балет премиум-класса для свадеб, корпоративов и праздников.\n\n"
                "Здесь можно оставить заявку на выступление за минуту, попросить перезвонить "
                "или задать вопрос ассистенту.")
 SHORT_DESCRIPTION = "Шоу-балет Oasis Dance: заявка на выступление за минуту 💃"
 
 
+ADMIN_BOT_DESCRIPTION = ("Служебный бот шоу-балета Oasis Dance для менеджера: заявки, календарь выступлений, "
+                         "посты в канал. Клиентам — в основного бота.")
+
+
 def setup_profile():
     def cmds(lst):
         return [{"command": c, "description": d} for c, d in lst]
-    tg.call("setMyCommands", {"commands": cmds(USER_COMMANDS), "scope": {"type": "all_private_chats"}})
-    for admin_id in config.ADMIN_CHAT_IDS:
-        tg.call("setMyCommands", {"commands": cmds(ADMIN_COMMANDS), "scope": {"type": "chat", "chat_id": admin_id}})
+    with tg.via("client"):
+        tg.call("setMyCommands", {"commands": cmds(USER_COMMANDS), "scope": {"type": "all_private_chats"}})
+        for admin_id in config.ADMIN_CHAT_IDS:
+            if tg.split_mode():  # у менеджера свой бот — здесь он видит меню клиента
+                tg.call("deleteMyCommands", {"scope": {"type": "chat", "chat_id": admin_id}})
+            else:
+                tg.call("setMyCommands", {"commands": cmds(ADMIN_COMMANDS),
+                                          "scope": {"type": "chat", "chat_id": admin_id}})
+        _setup_descriptions()
+    if tg.split_mode():
+        with tg.via("admin"):
+            tg.call("setMyCommands", {"commands": cmds(MANAGER_COMMANDS), "scope": {"type": "all_private_chats"}})
+            cur = tg.call("getMyDescription") or {}
+            if (cur.get("result") or {}).get("description") != ADMIN_BOT_DESCRIPTION:
+                tg.call("setMyDescription", {"description": ADMIN_BOT_DESCRIPTION})
+
+
+def _setup_descriptions():
     cur = tg.call("getMyDescription") or {}
     if (cur.get("result") or {}).get("description") != DESCRIPTION:
         tg.call("setMyDescription", {"description": DESCRIPTION})
@@ -694,9 +738,9 @@ def _chat_of(upd):
     return (upd.get("message") or {}).get("chat", {}).get("id")
 
 
-def handle_update(upd):
+def handle_update(upd, bot="client"):
     # Сообщения одного чата обрабатываем по очереди, разных чатов — параллельно
-    with _chat_locks[_chat_of(upd)]:
+    with tg.via(bot), _chat_locks[(bot, _chat_of(upd))]:
         try:
             if "callback_query" in upd:
                 on_callback(upd["callback_query"])
@@ -706,16 +750,17 @@ def handle_update(upd):
             logger.error("Ошибка обработки обновления:\n%s", traceback.format_exc())
 
 
-_last_poll = [time.time()]
+_last_poll = {"client": time.time()}
 WATCHDOG_SEC = 300
 
 
 def watchdog():
     while True:
         time.sleep(30)
-        if time.time() - _last_poll[0] > WATCHDOG_SEC:
-            logger.error("Приём сообщений не отвечает %s сек — перезапуск", WATCHDOG_SEC)
-            os._exit(1)  # systemd (Restart=always) поднимет бота заново
+        for bot, ts in list(_last_poll.items()):
+            if time.time() - ts > WATCHDOG_SEC:
+                logger.error("Приём сообщений (%s) не отвечает %s сек — перезапуск", bot, WATCHDOG_SEC)
+                os._exit(1)  # systemd (Restart=always) поднимет бота заново
 
 
 def background():
@@ -735,6 +780,37 @@ def background():
         time.sleep(60)
 
 
+def poll(bot, pool, ack_pool):
+    """Приём обновлений одного бота (клиентского или бота менеджера)."""
+    offset = None
+    while True:
+        try:
+            params = {"timeout": 30, "allowed_updates": ["message", "callback_query"]}
+            if offset:
+                params["offset"] = offset
+            _last_poll[bot] = time.time()
+            with tg.via(bot):
+                resp = tg.call("getUpdates", params, timeout=40)
+            if not resp or not resp.get("ok"):
+                if resp and resp.get("error_code") == 409:
+                    logger.error("Конфликт 409 (%s): бот запущен ещё где-то (например, в Replit).", bot)
+                time.sleep(5)
+                continue
+            for upd in resp["result"]:
+                offset = upd["update_id"] + 1
+                if "callback_query" in upd:
+                    ack_pool.submit(_ack, bot, upd["callback_query"]["id"])
+                pool.submit(handle_update, upd, bot)
+        except Exception:
+            logger.error("Ошибка цикла (%s):\n%s", bot, traceback.format_exc())
+            time.sleep(5)
+
+
+def _ack(bot, callback_id):
+    with tg.via(bot):
+        tg.answer_callback(callback_id)
+
+
 def run():
     if not config.TELEGRAM_BOT_TOKEN:
         logger.error("Не задан TELEGRAM_BOT_TOKEN в файле .env")
@@ -743,15 +819,27 @@ def run():
     if not (me and me.get("ok")):
         logger.error("Не удалось подключиться к Telegram (проверьте токен и интернет на сервере)")
         sys.exit(1)
+    config.BOT_USERNAME = me["result"]["username"]
+    if tg.split_mode():
+        with tg.via("admin"):
+            me_admin = tg.call("getMe")
+        if me_admin and me_admin.get("ok"):
+            config.ADMIN_BOT_USERNAME = me_admin["result"]["username"]
+        else:
+            logger.error("Токен бота менеджера (ADMIN_BOT_TOKEN) не работает — меню менеджера будет в общем боте")
+            config.ADMIN_BOT_TOKEN = ""
+            tg._TOKENS["admin"] = config.TELEGRAM_BOT_TOKEN
 
     imported = storage.migrate_jsonl(os.path.join(config.DATA_DIR, "orders.jsonl"))
     if imported:
         logger.info("Перенесено заявок из прошлой версии: %s", imported)
-    config.BOT_USERNAME = me["result"]["username"]
-    logger.info("Бот @%s запущен. ИИ-ассистент: %s. Администраторы: %s",
-                me["result"]["username"], "включён" if ai.is_available() else "выключен",
-                config.ADMIN_CHAT_IDS or "не заданы")
-    tg.call("deleteWebhook", {"drop_pending_updates": False})
+    logger.info("Бот @%s запущен%s. ИИ-ассистент: %s. Администраторы: %s", config.BOT_USERNAME,
+                f", бот менеджера @{config.ADMIN_BOT_USERNAME}" if tg.split_mode() else "",
+                "включён" if ai.is_available() else "выключен", config.ADMIN_CHAT_IDS or "не заданы")
+    bots = ["client"] + (["admin"] if tg.split_mode() else [])
+    for bot in bots:
+        with tg.via(bot):
+            tg.call("deleteWebhook", {"drop_pending_updates": False})
     try:
         setup_profile()
     except Exception:
@@ -762,30 +850,12 @@ def run():
 
     pool = ThreadPoolExecutor(max_workers=16)
     ack_pool = ThreadPoolExecutor(max_workers=4)  # мгновенно убирает «часики» на кнопках
-    offset = None
-    while True:
-        try:
-            params = {"timeout": 30, "allowed_updates": ["message", "callback_query"]}
-            if offset:
-                params["offset"] = offset
-            _last_poll[0] = time.time()
-            resp = tg.call("getUpdates", params, timeout=40)
-            if not resp or not resp.get("ok"):
-                if resp and resp.get("error_code") == 409:
-                    logger.error("Конфликт 409: бот запущен ещё где-то (например, в Replit). Остановите копию.")
-                time.sleep(5)
-                continue
-            for upd in resp["result"]:
-                offset = upd["update_id"] + 1
-                if "callback_query" in upd:
-                    ack_pool.submit(tg.answer_callback, upd["callback_query"]["id"])
-                pool.submit(handle_update, upd)
-        except KeyboardInterrupt:
-            logger.info("Остановлено")
-            break
-        except Exception:
-            logger.error("Ошибка цикла:\n%s", traceback.format_exc())
-            time.sleep(5)
+    if "admin" in bots:
+        threading.Thread(target=poll, args=("admin", pool, ack_pool), daemon=True).start()
+    try:
+        poll("client", pool, ack_pool)
+    except KeyboardInterrupt:
+        logger.info("Остановлено")
 
 
 if __name__ == "__main__":

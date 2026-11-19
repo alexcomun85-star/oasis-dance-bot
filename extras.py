@@ -72,7 +72,8 @@ def answer_date(admin_id, oid: int, free: bool):
                 "Выберите другую дату или свяжитесь с менеджером — подскажем варианты.")
         kb = {"inline_keyboard": [[{"text": "📅 Другая дата", "callback_data": "date"}],
                                   [{"text": "✉️ Написать менеджеру", "url": config.MANAGER_URL}]]}
-    r = tg.send_message(order["chat_id"], text, kb)
+    with tg.via("client"):
+        r = tg.send_message(order["chat_id"], text, kb)
     order["data"]["answer"] = "свободна" if free else "занята"
     storage._q("UPDATE orders SET data=? , status=?, updated=? WHERE id=?",
                (json.dumps(order["data"], ensure_ascii=False), "done", time.time(), oid), commit=True)
@@ -93,12 +94,13 @@ def ask_review(oid: int):
     storage._q("UPDATE orders SET data=? WHERE id=?",
                (json.dumps(order["data"], ensure_ascii=False), oid), commit=True)
     stars = [{"text": "⭐" * n, "callback_data": f"rv_{oid}_{n}"} for n in (5, 4, 3)]
-    tg.send_message(order["chat_id"],
-                    "💃 Спасибо, что выбрали Oasis Dance!\n\nКак вам выступление? Поставьте оценку — "
-                    "это займёт секунду и очень поможет коллективу.",
-                    {"inline_keyboard": [stars[:1], stars[1:],
-                                         [{"text": "⭐⭐", "callback_data": f"rv_{oid}_2"},
-                                          {"text": "⭐", "callback_data": f"rv_{oid}_1"}]]})
+    with tg.via("client"):
+        tg.send_message(order["chat_id"],
+                        "💃 Спасибо, что выбрали Oasis Dance!\n\nКак вам выступление? Поставьте оценку — "
+                        "это займёт секунду и очень поможет коллективу.",
+                        {"inline_keyboard": [stars[:1], stars[1:],
+                                             [{"text": "⭐⭐", "callback_data": f"rv_{oid}_2"},
+                                              {"text": "⭐", "callback_data": f"rv_{oid}_1"}]]})
 
 
 _review_wait = {}
@@ -113,8 +115,9 @@ def review_callback(chat_id, data):
     order["data"]["rating"] = n
     storage._q("UPDATE orders SET data=? WHERE id=?",
                (json.dumps(order["data"], ensure_ascii=False), oid), commit=True)
-    for admin_id in config.ADMIN_CHAT_IDS:
-        tg.send_message(admin_id, f"{'⭐' * n} Оценка по заявке №{oid} от {admin._who(order)}")
+    with tg.via("admin"):
+        for admin_id in config.ADMIN_CHAT_IDS:
+            tg.send_message(admin_id, f"{'⭐' * n} Оценка по заявке №{oid} от {admin._who(order)}")
     _review_wait[chat_id] = oid
     if n >= 4:
         return [("Спасибо! 🥰 Будем рады, если напишете пару слов о выступлении — "
@@ -134,9 +137,10 @@ def review_text(chat_id, text):
     order = storage.get_order(oid) if oid else None
     if not order:
         return None
-    for admin_id in config.ADMIN_CHAT_IDS:
-        tg.send_message(admin_id, f"📝 <b>Отзыв</b> по заявке №{oid} ({'⭐' * order['data'].get('rating', 0)}) "
-                                  f"от {admin._who(order)}:\n\n{html.escape(text[:2000])}")
+    with tg.via("admin"):
+        for admin_id in config.ADMIN_CHAT_IDS:
+            tg.send_message(admin_id, f"📝 <b>Отзыв</b> по заявке №{oid} ({'⭐' * order['data'].get('rating', 0)}) "
+                                      f"от {admin._who(order)}:\n\n{html.escape(text[:2000])}")
     return [("Спасибо за отзыв! Передали коллективу 💛", ui.MAIN_REPLY_KB)]
 
 
@@ -165,9 +169,10 @@ def morning_digest():
             f"🆕 Ждут ответа: <b>{n_new}</b>\n"
             f"🔄 В работе: {n_work}\n"
             f"📝 Черновиков для канала: {drafts}")
-    kb = {"inline_keyboard": [[{"text": "🗂 Открыть кабинет", "callback_data": "adm_menu"}]]}
-    for admin_id in config.ADMIN_CHAT_IDS:
-        tg.send_message(admin_id, text, kb)
+    kb = {"inline_keyboard": [[{"text": "🗂 Открыть заявки", "callback_data": "adm_menu"}]]}
+    with tg.via("admin"):
+        for admin_id in config.ADMIN_CHAT_IDS:
+            tg.send_message(admin_id, text, kb)
 
 
 # ---------- выгрузка заявок в таблицу ----------
