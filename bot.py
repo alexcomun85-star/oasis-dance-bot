@@ -302,6 +302,8 @@ def on_command(chat_id, user, cmd):
             return [admin.stats_screen()]
         if cmd == "/post":
             return [channel.start(chat_id)]
+        if cmd == "/status":
+            return [admin.status_screen()]
         if cmd == "/sources":
             return [sources.status_screen()]
     return help_screen(chat_id)
@@ -489,7 +491,7 @@ USER_COMMANDS = [
 ]
 ADMIN_COMMANDS = USER_COMMANDS + [("admin", "Кабинет заявок"), ("orders", "Новые заявки"),
                                   ("stats", "Статистика"), ("post", "Пост в канал"),
-                                  ("sources", "Соцсети → канал")]
+                                  ("sources", "Соцсети → канал"), ("status", "Что подключено")]
 DESCRIPTION = ("Шоу-балет Oasis Dance — шоу-балет премиум-класса для свадеб, корпоративов и праздников.\n\n"
                "Здесь можно оставить заявку на выступление за минуту, попросить перезвонить "
                "или задать вопрос ассистенту.")

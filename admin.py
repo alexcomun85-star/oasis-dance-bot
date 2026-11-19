@@ -128,6 +128,7 @@ def menu_screen():
          {"text": f"🔄 В работе ({n_work})", "callback_data": "adm_list_work_0"}],
         [{"text": "📁 Закрытые", "callback_data": "adm_list_closed_0"},
          {"text": "📊 Статистика", "callback_data": "adm_stats"}],
+        [{"text": "⚙️ Что подключено", "callback_data": "adm_status"}],
         [{"text": "📢 Пост в канал", "callback_data": "ch_menu"},
          {"text": "🔗 Соцсети → канал", "callback_data": "src_menu"}],
     ]}
@@ -208,6 +209,12 @@ def handle_callback(chat_id, message_id, data: str):
         return menu_screen()
     if data == "adm_stats":
         return stats_screen()
+    if data == "adm_status":
+        return status_screen()
+    if data == "adm_aitest":
+        tg.send_message(chat_id, "🧪 Проверяю ИИ, это займёт до минуты…")
+        tg.send_message(chat_id, ai_test())
+        return None
     if data.startswith("adm_list_"):
         _, _, tab, page = data.split("_")
         return list_screen(tab, int(page))
@@ -320,3 +327,39 @@ def check_abandoned():
         oid = storage.add_order(chat_id, "abandoned", form["user"], data)
         notify_new(oid)
         logger.info("Брошенная заявка от %s сохранена как №%s", chat_id, oid)
+
+
+# ---------- состояние подключений ----------
+
+def status_screen():
+    import ai
+    from urllib.parse import urlparse
+    yes, no = "✅", "❌"
+    fb_host = urlparse(config.AI_FALLBACK_URL).netloc
+    lu = ai.last_used
+    last = (f"{lu['model']}, {time.strftime('%d.%m %H:%M', time.localtime(lu['time']))}"
+            if lu["model"] else "с момента запуска ещё не отвечал")
+    text = ("⚙️ <b>Что подключено</b>\n\n"
+            f"{yes} Telegram: бот работает\n"
+            f"{yes if config.GEMINI_API_KEY else no} Gemini (основной ИИ)\n"
+            f"{yes if config.AI_FALLBACK_KEY else no} Запасной ИИ: {html.escape(fb_host)}"
+            f"{' (модель ' + html.escape(config.AI_FALLBACK_MODEL) + ')' if config.AI_FALLBACK_MODEL != 'auto' else ''}\n"
+            f"   последний ответ ИИ: {html.escape(last)}\n"
+            f"{yes if config.VK_SERVICE_TOKEN else no} ВКонтакте (ключ)\n"
+            f"{yes if config.FEED_SOURCES else no} Ленты (Instagram и др.): {len(config.FEED_SOURCES)}\n"
+            f"📢 Канал: {html.escape(config.CHANNEL_ID)}\n"
+            f"👤 Администраторы: {', '.join(map(str, config.ADMIN_CHAT_IDS)) or '—'}")
+    return text, {"inline_keyboard": [[{"text": "🧪 Проверить ИИ", "callback_data": "adm_aitest"}],
+                                      [{"text": "🗂 Кабинет", "callback_data": "adm_menu"}]]}
+
+
+def ai_test():
+    import ai
+    started = time.time()
+    try:
+        ans = ai._call("Ответь коротко по-русски.", [{"role": "user", "parts": [{"text": "Скажи: работает"}]}],
+                       temperature=0, max_tokens=500)
+        return (f"🧪 ИИ отвечает ✅\nОтветил: {html.escape(ai.last_used['model'] or '?')} "
+                f"за {time.time() - started:.1f} с\nОтвет: {html.escape(ans[:100])}")
+    except Exception as e:
+        return f"🧪 ИИ не ответил ❌\n{html.escape(str(e))[:300]}\nПодробности — в журнале бота."

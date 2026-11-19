@@ -438,4 +438,13 @@ assert "reel/NEW3" in cp[0]["text"]
 did3 = int([b for b in buttons(cp[0]) if b.startswith("dr_regen_")][0][9:])
 cb(f"dr_regen_{did3}", A)
 assert "Переписано" in storage.get_draft(did3)["text"], "кнопка «Переписать ИИ» работает и в режиме оригинала"
+
+# --- /status
+msg("/status", A)
+assert "Что подключено" in last(111)["text"] and "Gemini" in last(111)["text"]
+ai._call = lambda *a, **k: "работает"
+cb("adm_aitest", A)
+assert "ИИ отвечает" in last(111)["text"]
+msg("/status", U)
+assert "Что подключено" not in last()["text"]
 print("OK, вызовов API:", len(sent))

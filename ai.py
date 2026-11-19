@@ -110,6 +110,7 @@ def generate(message: str, history: list = None) -> str:
 
 
 _models_cache = {"time": 0, "list": []}
+last_used = {"model": None, "time": 0, "seconds": 0}
 _SKIP = ("image", "tts", "audio", "live", "embedding", "aqa", "learnlm", "robotics", "computer")
 
 
@@ -181,6 +182,7 @@ def _call(system: str, contents: list, temperature: float, max_tokens: int,
             text = "".join(p.get("text", "") for p in parts).strip()
             if text:
                 logger.info("ИИ ответил: Gemini %s за %.1f с", model, time.time() - started)
+                last_used.update(model=f"Gemini {model}", time=time.time(), seconds=time.time() - started)
                 return text.replace("**", "")
         except requests.Timeout:
             logger.error("Gemini %s не ответил за %s секунд", model, read_timeout)
@@ -239,4 +241,5 @@ def _call_fallback(system: str, contents: list, timeout: float) -> str:
     if not text:
         raise RuntimeError(f"{model}: пустой ответ")
     logger.info("ИИ ответил: запасной ИИ %s", model)
+    last_used.update(model=f"запасной {model}", time=time.time(), seconds=0)
     return text.replace("**", "")
