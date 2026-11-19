@@ -1,0 +1,16 @@
+[Unit]
+Description=Telegram bot Oasis Dance (@oasisdance_show_bot)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=oasisbot
+WorkingDirectory=/opt/oasis-bot
+ExecStart=/opt/oasis-bot/venv/bin/python /opt/oasis-bot/bot.py
+Restart=always
+RestartSec=10
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target
