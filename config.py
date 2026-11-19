@@ -34,7 +34,10 @@ ADMIN_CHAT_IDS = [
 # --- ИИ-ассистент (Google Gemini) ---
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 # Псевдоним «последняя Flash-модель»: не устаревает при выводе конкретных версий
-GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-flash-latest")
+# auto — бот сам выбирает из доступных моделей (стабильные первыми); можно указать конкретную
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "auto")
+if GEMINI_MODEL == "gemini-flash-latest":  # прежнее значение по умолчанию из старых .env — переводим на автовыбор
+    GEMINI_MODEL = "auto"
 
 # --- Контакты коллектива ---
 MANAGER_USERNAME = os.environ.get("MANAGER_USERNAME", "EbruBekker").lstrip("@")
