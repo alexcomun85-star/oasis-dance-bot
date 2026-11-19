@@ -180,6 +180,7 @@ def _call(system: str, contents: list, temperature: float, max_tokens: int,
             parts = r.json().get("candidates", [{}])[0].get("content", {}).get("parts", [])
             text = "".join(p.get("text", "") for p in parts).strip()
             if text:
+                logger.info("ИИ ответил: Gemini %s за %.1f с", model, time.time() - started)
                 return text.replace("**", "")
         except requests.Timeout:
             logger.error("Gemini %s не ответил за %s секунд", model, read_timeout)
@@ -237,5 +238,5 @@ def _call_fallback(system: str, contents: list, timeout: float) -> str:
     text = (r.json()["choices"][0]["message"].get("content") or "").strip()
     if not text:
         raise RuntimeError(f"{model}: пустой ответ")
-    logger.info("Ответил запасной ИИ (%s)", model)
+    logger.info("ИИ ответил: запасной ИИ %s", model)
     return text.replace("**", "")
