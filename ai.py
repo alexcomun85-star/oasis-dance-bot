@@ -1,7 +1,9 @@
 """
-ИИ-ассистент на Google Gemini через REST API (без устаревшей библиотеки google-generativeai).
+ИИ-ассистент на Google Gemini через REST API.
+Сведения о коллективе берутся из knowledge.md.
 """
 import logging
+import os
 
 import requests
 
@@ -11,30 +13,30 @@ logger = logging.getLogger(__name__)
 
 API = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
 FALLBACK_MODELS = ["gemini-flash-latest", "gemini-flash-lite-latest"]
+KNOWLEDGE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "knowledge.md")
+
+
+def _knowledge() -> str:
+    try:
+        with open(KNOWLEDGE_FILE, encoding="utf-8") as f:
+            return "\n".join(l for l in f.read().splitlines() if not l.lstrip().startswith("#") or l.startswith("##"))
+    except FileNotFoundError:
+        return ""
 
 
 def _system_prompt() -> str:
-    contacts = [f"- Менеджер в Telegram: @{config.MANAGER_USERNAME}"]
-    if config.MANAGER_PHONE:
-        contacts.append(f"- Телефон: {config.MANAGER_PHONE}")
-    if config.MANAGER_EMAIL:
-        contacts.append(f"- Email: {config.MANAGER_EMAIL}")
-    contacts.append(f"- Instagram: {config.INSTAGRAM_URL}")
-    contacts.append(f"- ВКонтакте: {config.VK_URL}")
-    contacts.append(f"- Telegram-канал: {config.CHANNEL_URL}")
     return (
-        "Ты — виртуальный ассистент шоу-балета Oasis Dance (ранее Ebru Dance). "
-        "Помогаешь клиентам: отвечаешь на вопросы о коллективе, выступлениях, репертуаре и заказе шоу.\n\n"
-        "Сведения о шоу-балете:\n"
-        "- Профессиональный танцевальный коллектив.\n"
-        "- В репертуаре восточные, латиноамериканские, современные, народные танцы и шоу-номера.\n"
-        "- Выступает на корпоративах, свадьбах, днях рождения, частных праздниках.\n"
-        "- Возможны индивидуальные номера под тематику мероприятия.\n"
-        "- Стоимость зависит от числа танцовщиц и номеров; точную цену называет менеджер.\n\n"
-        "Контакты:\n" + "\n".join(contacts) + "\n\n"
-        "Отвечай вежливо, кратко (до 5–6 предложений), на русском языке, обычным текстом без разметки Markdown. "
-        "Не выдумывай факты, цены, даты и состав — если сведений нет, предложи связаться с менеджером. "
-        "Для заказа выступления предлагай кнопку «Заказать выступление» или менеджера."
+        "Ты — вежливый виртуальный ассистент шоу-балета Oasis Dance в Telegram-боте. "
+        "Помогаешь потенциальным заказчикам: отвечаешь о коллективе, программах, мероприятиях и порядке заказа.\n\n"
+        "Сведения о коллективе (используй только их):\n" + _knowledge() + "\n\n"
+        "Правила:\n"
+        "- Отвечай на русском, кратко: 2–5 предложений, обычным текстом без Markdown и без списков со звёздочками.\n"
+        "- Не выдумывай цены, телефоны, даты, имена танцовщиц и другие факты, которых нет в сведениях. "
+        "Если сведений нет — честно скажи и предложи оставить заявку или написать менеджеру.\n"
+        "- Если человек хочет заказать выступление или узнать цену на свою дату — предложи нажать "
+        "«Заказать выступление» или «Перезвоните мне» под этим сообщением.\n"
+        "- Не обсуждай темы, не связанные с шоу-балетом и мероприятиями; мягко возвращай разговор к ним.\n"
+        "- Ты ассистент, а не человек; не обещай ничего от имени менеджера."
     )
 
 
@@ -48,31 +50,26 @@ def generate(message: str, history: list = None) -> str:
     for m in (history or [])[-20:]:
         role = "model" if m.get("role") == "assistant" else "user"
         contents.append({"role": role, "parts": [{"text": m.get("content", "")}]})
-    contents.append({"role": "user", "parts": [{"text": message}]})
+    contents.append({"role": "user", "parts": [{"text": message[:2000]}]})
 
     body = {
         "systemInstruction": {"parts": [{"text": _system_prompt()}]},
         "contents": contents,
-        "generationConfig": {"temperature": 0.6, "maxOutputTokens": 800},
+        "generationConfig": {"temperature": 0.5, "maxOutputTokens": 600},
     }
 
     models = [config.GEMINI_MODEL] + [m for m in FALLBACK_MODELS if m != config.GEMINI_MODEL]
     for model in models:
         try:
-            r = requests.post(
-                API.format(model=model),
-                params={"key": config.GEMINI_API_KEY},
-                json=body,
-                timeout=60,
-            )
+            r = requests.post(API.format(model=model), params={"key": config.GEMINI_API_KEY},
+                              json=body, timeout=60)
             if r.status_code != 200:
                 logger.error("Gemini %s: %s %s", model, r.status_code, r.text[:300])
                 continue
-            data = r.json()
-            parts = data.get("candidates", [{}])[0].get("content", {}).get("parts", [])
+            parts = r.json().get("candidates", [{}])[0].get("content", {}).get("parts", [])
             text = "".join(p.get("text", "") for p in parts).strip()
             if text:
-                return text
+                return text.replace("**", "")
         except Exception as e:
             logger.error("Ошибка Gemini %s: %s", model, e)
     raise RuntimeError("Gemini не вернул ответ")

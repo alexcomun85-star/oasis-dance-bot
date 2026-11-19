@@ -48,6 +48,16 @@ CHANNEL_URL = os.environ.get("CHANNEL_URL", "https://t.me/oasis_dance_show")
 
 MANAGER_URL = f"https://t.me/{MANAGER_USERNAME}"
 
+# --- Ограничения ИИ (защита ключа Gemini от перерасхода) ---
+AI_LIMIT_PER_USER_HOUR = int(os.environ.get("AI_LIMIT_PER_USER_HOUR", "20"))
+AI_LIMIT_PER_DAY = int(os.environ.get("AI_LIMIT_PER_DAY", "500"))
+
+# Через сколько минут бездействия незавершённая заявка считается брошенной
+ABANDON_MINUTES = int(os.environ.get("ABANDON_MINUTES", "30"))
+
+# Название оператора персональных данных для текста согласия
+OPERATOR_NAME = os.environ.get("OPERATOR_NAME", "шоу-балет Oasis Dance")
+
 # --- Файлы данных ---
 DATA_DIR = os.environ.get(
     "DATA_DIR", os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")

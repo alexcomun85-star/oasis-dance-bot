@@ -7,8 +7,11 @@ import html
 import logging
 import os
 import sys
+import threading
 import time
 import traceback
+from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor
 from logging.handlers import RotatingFileHandler
 
 import config
@@ -22,289 +25,492 @@ logging.basicConfig(
 )
 logger = logging.getLogger("oasis")
 
+
+class _RedactSecrets(logging.Filter):
+    """Убирает токен бота и ключ Gemini из любых строк журнала (сетевые ошибки содержат адрес запроса)."""
+    def filter(self, record):
+        secrets = [s for s in (config.TELEGRAM_BOT_TOKEN, config.GEMINI_API_KEY) if s]
+        if secrets:
+            msg = record.getMessage()
+            for secret in secrets:
+                msg = msg.replace(secret, "***")
+            record.msg, record.args = msg, None
+        return True
+
+
+for _h in logging.getLogger().handlers:
+    _h.addFilter(_RedactSecrets())
+
+import admin  # noqa: E402
 import ai  # noqa: E402
 import order_form  # noqa: E402
+import storage  # noqa: E402
 import tg  # noqa: E402
 
-# Режим ИИ-ассистента и история диалогов (в памяти)
-ai_sessions: dict = {}
-AI_EXIT_WORDS = {"выход", "exit", "quit", "стоп", "stop", "закрыть"}
+REMOVE_KB = {"remove_keyboard": True}
+
+# Клиенты, которые нажали «Перезвоните мне» и ещё не прислали номер
+_callback_wait = set()
+_state_lock = threading.Lock()
 
 
-# ---------- клавиатуры ----------
+# ---------- отправка набора сообщений ----------
 
-def main_keyboard():
+def render(chat_id, msgs, edit_id=None):
+    """msgs — список (текст, клавиатура). Первое сообщение по возможности редактирует edit_id."""
+    for i, (text, kb) in enumerate(msgs or []):
+        inline_or_none = kb is None or "inline_keyboard" in kb
+        if i == 0 and edit_id and inline_or_none:
+            tg.edit_message(chat_id, edit_id, text, kb)
+        else:
+            tg.send_message(chat_id, text, kb)
+
+
+# ---------- главное меню и разделы ----------
+
+def main_keyboard(chat_id=None):
     rows = [
         [{"text": "🎭 Заказать выступление", "callback_data": "order"}],
-        [{"text": "🎬 Видео выступлений", "callback_data": "video"}],
-        [{"text": "📱 Связаться с менеджером", "callback_data": "contact"}],
-        [{"text": "📸 Instagram", "callback_data": "instagram"},
-         {"text": "👥 VK", "callback_data": "vk"}],
-        [{"text": "👩‍💼 Предложить сотрудничество", "callback_data": "partnership"}],
+        [{"text": "📞 Перезвоните мне", "callback_data": "callme"}],
     ]
     if ai.is_available():
-        rows.insert(3, [{"text": "🤖 Спросить ассистента", "callback_data": "oasis"}])
+        rows.append([{"text": "💬 Задать вопрос", "callback_data": "ask"}])
+    rows += [
+        [{"text": "🎬 Видео и фото", "callback_data": "video"},
+         {"text": "📱 Контакты", "callback_data": "contact"}],
+        [{"text": "👩‍💼 Сотрудничество", "callback_data": "partnership"}],
+    ]
+    if chat_id and admin.is_admin(chat_id):
+        rows.append([{"text": "🗂 Кабинет заявок", "callback_data": "adm_menu"}])
     return {"inline_keyboard": rows}
 
 
-def back_row():
-    return [{"text": "◀️ Главное меню", "callback_data": "main_menu"}]
+def back_kb(*extra_rows):
+    return {"inline_keyboard": [*extra_rows, [{"text": "🏠 Главное меню", "callback_data": "main_menu"}]]}
 
 
-def manager_row(text="💬 Написать менеджеру"):
+def manager_row(text="✉️ Написать менеджеру"):
     return [{"text": text, "url": config.MANAGER_URL}]
 
 
-# ---------- разделы ----------
-
-def show_start(chat_id, user):
-    name = html.escape(user.get("first_name") or "Гость")
-    tg.send_message(chat_id, (
-        f"👋 Здравствуйте, {name}!\n\n"
-        "Добро пожаловать в официальный бот шоу-балета <b>Oasis Dance</b>.\n\n"
-        "Здесь вы можете:\n"
-        "🎭 заказать выступление на ваше мероприятие\n"
-        "🎬 посмотреть видео наших выступлений\n"
-        "📱 связаться с менеджером\n"
-        "👩‍💼 предложить сотрудничество\n\n"
-        "Выберите раздел:"
-    ), main_keyboard())
-
-
-def show_help(chat_id):
-    text = (
-        "📌 <b>Команды бота</b>\n\n"
-        "/start — главное меню\n"
-        "/order — заказать выступление\n"
-        "/video — видео выступлений\n"
-        "/contact — контакты менеджера\n"
-        "/instagram — наш Instagram\n"
-        "/vk — наша группа ВКонтакте\n"
-        "/partnership — сотрудничество\n"
-    )
+def start_screen(chat_id, user):
+    name = html.escape(user.get("first_name") or "")
+    text = (f"👋 Здравствуйте{', ' + name if name else ''}!\n\n"
+            "Это бот шоу-балета <b>Oasis Dance</b> — шоу-балета премиум-класса.\n\n"
+            "🎭 Оставьте заявку на выступление — это займёт минуту\n"
+            "📞 Или оставьте номер, и менеджер перезвонит\n")
     if ai.is_available():
-        text += "/oasis — задать вопрос ассистенту\n"
-    text += "/cancel — отменить заполнение заявки"
-    tg.send_message(chat_id, text, main_keyboard())
+        text += "💬 А на вопросы ответит ассистент — просто напишите сообщение\n"
+    text += "\nВыберите, что вас интересует:"
+    return [(text, main_keyboard(chat_id))]
 
 
-def show_video(chat_id):
-    tg.send_message(chat_id,
-                    "🎬 <b>Видео выступлений шоу-балета Oasis Dance</b>\n\n"
-                    "Видео наших номеров — в Instagram и Telegram-канале:",
-                    {"inline_keyboard": [
-                        [{"text": "📸 Instagram", "url": config.INSTAGRAM_URL}],
-                        [{"text": "📢 Telegram-канал", "url": config.CHANNEL_URL}],
-                        back_row()]})
+def help_screen(chat_id):
+    text = ("📌 <b>Что умеет бот</b>\n\n"
+            "/order — заказать выступление\n"
+            "/callme — попросить перезвонить\n"
+            "/video — видео и фото выступлений\n"
+            "/contact — контакты\n"
+            "/privacy — обработка персональных данных\n"
+            "/cancel — отменить текущее действие\n")
+    if ai.is_available():
+        text += "\nЛюбой вопрос можно просто написать сообщением — ответит ассистент."
+    if admin.is_admin(chat_id):
+        text += "\n\n<b>Для администратора:</b>\n/admin — кабинет заявок\n/orders — новые заявки\n/stats — статистика"
+    return [(text, back_kb())]
 
 
-def show_contact(chat_id):
-    lines = ["📱 <b>Контакты менеджера</b>\n",
-             "Менеджер ответит на вопросы о выступлениях, репертуаре и стоимости.\n",
-             f"📲 Telegram: @{config.MANAGER_USERNAME}"]
+def video_screen():
+    return [("🎬 <b>Видео и фото выступлений</b>\n\n"
+             "Смотрите наши номера в соцсетях:",
+             back_kb([{"text": "👥 ВКонтакте", "url": config.VK_URL}],
+                     [{"text": "📢 Telegram-канал", "url": config.CHANNEL_URL}],
+                     [{"text": "📸 Instagram", "url": config.INSTAGRAM_URL}]))]
+
+
+def contact_screen():
+    lines = ["📱 <b>Контакты</b>\n",
+             "Менеджер ответит на вопросы о программах, свободных датах и стоимости.\n",
+             f"✉️ Telegram: @{config.MANAGER_USERNAME}"]
     if config.MANAGER_PHONE:
         lines.append(f"☎️ Телефон: {config.MANAGER_PHONE}")
     if config.MANAGER_EMAIL:
         lines.append(f"📧 Email: {config.MANAGER_EMAIL}")
     if config.WORK_HOURS:
-        lines.append(f"\nВремя работы: {config.WORK_HOURS}")
-    tg.send_message(chat_id, "\n".join(lines),
-                    {"inline_keyboard": [manager_row("💬 Написать в Telegram"), back_row()]})
+        lines.append(f"\n🕙 {config.WORK_HOURS}")
+    return [("\n".join(lines), back_kb(manager_row(), [{"text": "📞 Перезвоните мне", "callback_data": "callme"}]))]
 
 
-def show_instagram(chat_id):
-    tg.send_message(chat_id,
-                    "📸 <b>Наш Instagram</b>\n\nНовости, видео выступлений и фото с мероприятий.",
-                    {"inline_keyboard": [[{"text": "📸 Перейти в Instagram", "url": config.INSTAGRAM_URL}],
-                                         back_row()]})
+def partnership_screen():
+    return [("👩‍💼 <b>Сотрудничество</b>\n\n"
+             "Мы открыты для сотрудничества с ивент-агентствами, площадками, ресторанами и организаторами. "
+             "Напишите менеджеру — обсудим условия.", back_kb(manager_row()))]
 
 
-def show_vk(chat_id):
-    tg.send_message(chat_id,
-                    "👥 <b>Наша группа ВКонтакте</b>\n\nНовости и анонсы мероприятий.",
-                    {"inline_keyboard": [[{"text": "👥 Перейти во ВКонтакте", "url": config.VK_URL}],
-                                         back_row()]})
+def ask_screen():
+    if not ai.is_available():
+        return [("Напишите ваш вопрос менеджеру — он ответит.", back_kb(manager_row()))]
+    return [("💬 Напишите ваш вопрос обычным сообщением — ассистент ответит.\n\n"
+             "Например: «Какие программы есть на свадьбу?» или «Выступаете ли вы в другом городе?»", back_kb())]
 
 
-def show_partnership(chat_id):
-    tg.send_message(chat_id,
-                    "👩‍💼 <b>Сотрудничество с шоу-балетом Oasis Dance</b>\n\n"
-                    "Мы открыты для сотрудничества с агентствами, площадками и организаторами. "
-                    "Напишите менеджеру, чтобы обсудить детали.",
-                    {"inline_keyboard": [manager_row(), back_row()]})
+def privacy_screen():
+    op = html.escape(config.OPERATOR_NAME)
+    text = ("🔒 <b>Обработка персональных данных</b>\n\n"
+            f"Оператор: {op}.\n\n"
+            "<b>Что мы получаем:</b> имя и имя пользователя Telegram, номер телефона (если вы его отправили), "
+            "сведения о мероприятии из заявки, вопросы ассистенту.\n\n"
+            "<b>Зачем:</b> чтобы связаться с вами по заявке и подготовить предложение. "
+            "Данные не передаются третьим лицам для рекламы.\n\n"
+            "<b>Ассистент:</b> вопросы, которые вы пишете ассистенту, обрабатываются сервисом Google Gemini. "
+            "Не указывайте в них лишние личные данные.\n\n"
+            "<b>Хранение:</b> заявки хранятся, пока нужны для работы с вами; технический журнал бота "
+            "не содержит текстов ваших сообщений и перезаписывается.\n\n"
+            "<b>Удаление:</b> команда /forget удалит ваши данные из бота. Уже полученные менеджером "
+            "уведомления о заявке удалите, попросив его об этом.")
+    return [(text, back_kb())]
 
 
-def show_order(chat_id, user):
-    text, kb = order_form.start(chat_id, user)
-    tg.send_message(chat_id, text, kb)
+# ---------- «Перезвоните мне» ----------
+
+def callme_start(chat_id):
+    if storage.too_many_submits(chat_id):
+        return order_form.LIMIT_MSG
+    with _state_lock:
+        _callback_wait.add(chat_id)
+    return [("📞 <b>Перезвоним вам</b>\n\nНажмите кнопку «Отправить номер» внизу экрана "
+             "или напишите номер сообщением." + order_form.consent_line(),
+             {"keyboard": [[{"text": order_form.BTN_SEND_PHONE, "request_contact": True}],
+                           [{"text": order_form.BTN_CANCEL}]],
+              "resize_keyboard": True, "one_time_keyboard": True})]
+
+
+def callme_finish(chat_id, user, phone, name=None):
+    with _state_lock:
+        _callback_wait.discard(chat_id)
+    u = {k: user.get(k) for k in ("id", "username", "first_name", "last_name")}
+    data = {"contact_phone": phone,
+            "contact_name": name or " ".join(x for x in (user.get("first_name"), user.get("last_name")) if x)}
+    oid = storage.add_order(chat_id, "callback", u, data)
+    storage.log_event(chat_id, "callback")
+    sent = admin.notify_new(oid)
+    text = "✅ Спасибо! Менеджер перезвонит вам в ближайшее время."
+    if not sent:
+        text += f"\nЕсли срочно — напишите @{config.MANAGER_USERNAME}."
+    return [(text, REMOVE_KB), ("Пока ждёте звонка — посмотрите наши выступления 👇", main_keyboard(chat_id))]
+
+
+def waiting_callback(chat_id) -> bool:
+    with _state_lock:
+        return chat_id in _callback_wait
 
 
 # ---------- ИИ-ассистент ----------
 
-def ai_start(chat_id, user):
+AI_KB = {"inline_keyboard": [
+    [{"text": "🎭 Заказать выступление", "callback_data": "order"},
+     {"text": "📞 Перезвоните мне", "callback_data": "callme"}],
+    [{"text": "🏠 Меню", "callback_data": "main_menu"}],
+]}
+
+
+def ai_answer(chat_id, text):
     if not ai.is_available():
-        tg.send_message(chat_id, "⚠️ Ассистент сейчас недоступен. Напишите, пожалуйста, менеджеру.",
-                        {"inline_keyboard": [manager_row(), back_row()]})
-        return
-    ai_sessions[chat_id] = {"on": True, "history": []}
-    name = html.escape(user.get("first_name") or "")
-    tg.send_message(chat_id, (
-        f"🤖 Здравствуйте{', ' + name if name else ''}! Я виртуальный ассистент шоу-балета Oasis Dance.\n\n"
-        "Задайте вопрос о коллективе, репертуаре или заказе выступления.\n"
-        "Чтобы выйти, напишите «выход» или нажмите кнопку ниже."
-    ), {"inline_keyboard": [[{"text": "◀️ Выйти из режима ассистента", "callback_data": "exit_ai"}]]})
-
-
-def ai_stop(chat_id):
-    ai_sessions.pop(chat_id, None)
-    tg.send_message(chat_id, "Вы вышли из режима ассистента. Чем ещё помочь?", main_keyboard())
-
-
-def ai_message(chat_id, text):
-    if text.strip().lower() in AI_EXIT_WORDS:
-        ai_stop(chat_id)
-        return
-    session = ai_sessions[chat_id]
+        return [("Чтобы задать вопрос, напишите менеджеру или выберите раздел в меню.",
+                 back_kb(manager_row()))]
+    hour_ago, day_ago = time.time() - 3600, time.time() - 86400
+    if (storage.count_events("ai", hour_ago, chat_id) >= config.AI_LIMIT_PER_USER_HOUR
+            or storage.count_events("ai", day_ago) >= config.AI_LIMIT_PER_DAY):
+        return [("Ассистент сейчас отдыхает 🙂 Напишите, пожалуйста, менеджеру — он ответит.",
+                 back_kb(manager_row()))]
     tg.typing(chat_id)
+    history = storage.get_history(chat_id)
     try:
-        answer = ai.generate(text, session["history"])
+        answer = ai.generate(text, history)
     except Exception as e:
         logger.error("Ассистент не ответил: %s", e)
-        tg.send_message(chat_id, "Извините, ассистент сейчас не может ответить. Напишите менеджеру.",
-                        {"inline_keyboard": [manager_row(), back_row()]})
-        return
-    session["history"] += [{"role": "user", "content": text}, {"role": "assistant", "content": answer}]
-    session["history"] = session["history"][-20:]
-    tg.send_message(chat_id, html.escape(answer), {"inline_keyboard": [
-        [{"text": "🎭 Заказать выступление", "callback_data": "order"}],
-        [{"text": "◀️ Выйти из режима ассистента", "callback_data": "exit_ai"}]]})
+        return [("Извините, ассистент сейчас не может ответить. Напишите менеджеру — он поможет.",
+                 back_kb(manager_row()))]
+    storage.log_event(chat_id, "ai")
+    storage.save_history(chat_id, history + [{"role": "user", "content": text},
+                                             {"role": "assistant", "content": answer}])
+    return [(html.escape(answer.replace("**", "")), AI_KB)]
 
 
-# ---------- маршрутизация ----------
+# ---------- обработка входящих ----------
 
-COMMANDS = {
-    "/help": lambda c, u: show_help(c),
-    "/video": lambda c, u: show_video(c),
-    "/contact": lambda c, u: show_contact(c),
-    "/instagram": lambda c, u: show_instagram(c),
-    "/vk": lambda c, u: show_vk(c),
-    "/partnership": lambda c, u: show_partnership(c),
-    "/order": show_order,
-    "/oasis": ai_start,
-    "/chatgpt": ai_start,
-}
+def cancel_all(chat_id):
+    with _state_lock:
+        _callback_wait.discard(chat_id)
+    admin.cancel_reply(chat_id)
+    admin.client_cancel(chat_id)
+    if order_form.is_filling(chat_id):
+        return order_form.cancel(chat_id)
+    return [("Отменено.", REMOVE_KB), ("Чем ещё помочь?", main_keyboard(chat_id))]
 
-CALLBACKS = {
-    "main_menu": show_start,
-    "video": lambda c, u: show_video(c),
-    "contact": lambda c, u: show_contact(c),
-    "instagram": lambda c, u: show_instagram(c),
-    "vk": lambda c, u: show_vk(c),
-    "partnership": lambda c, u: show_partnership(c),
-    "oasis": ai_start,
-    "exit_ai": lambda c, u: ai_stop(c),
-}
 
-TEXT_SHORTCUTS = {
-    "заказать": show_order, "заказать шоу": show_order,
-    "видео": lambda c, u: show_video(c),
-    "контакт": lambda c, u: show_contact(c), "контакты": lambda c, u: show_contact(c),
-    "инстаграм": lambda c, u: show_instagram(c), "instagram": lambda c, u: show_instagram(c),
-    "вк": lambda c, u: show_vk(c), "vk": lambda c, u: show_vk(c),
-    "сотрудничество": lambda c, u: show_partnership(c), "партнерство": lambda c, u: show_partnership(c),
-    "привет": show_start, "здравствуйте": show_start, "добрый день": show_start,
-    "помощь": lambda c, u: show_help(c), "справка": lambda c, u: show_help(c),
-    "ассистент": ai_start, "помощник": ai_start,
-}
+def on_command(chat_id, user, cmd):
+    if cmd == "/start":
+        admin.cancel_reply(chat_id)
+        return start_screen(chat_id, user)
+    if cmd == "/cancel":
+        return cancel_all(chat_id)
+    if cmd == "/help":
+        return help_screen(chat_id)
+    if cmd == "/order":
+        return order_form.start(chat_id, user)
+    if cmd == "/callme":
+        return callme_start(chat_id)
+    if cmd == "/video":
+        return video_screen()
+    if cmd == "/contact":
+        return contact_screen()
+    if cmd == "/partnership":
+        return partnership_screen()
+    if cmd in ("/ask", "/oasis"):
+        return ask_screen()
+    if cmd == "/privacy":
+        return privacy_screen()
+    if cmd == "/forget":
+        return [("Удалить ваши данные из бота (незаконченную заявку, историю вопросов ассистенту, "
+                 "контактные данные в заявках)? Это нельзя отменить.",
+                 {"inline_keyboard": [[{"text": "🗑 Да, удалить", "callback_data": "forget_yes"},
+                                       {"text": "Нет", "callback_data": "main_menu"}]]})]
+    if cmd == "/myid":
+        return [(f"Ваш Telegram ID: <code>{chat_id}</code>", None)]
+    if admin.is_admin(chat_id):
+        if cmd == "/admin":
+            return [admin.menu_screen()]
+        if cmd == "/orders":
+            return [admin.list_screen("new", 0)]
+        if cmd == "/stats":
+            return [admin.stats_screen()]
+    return help_screen(chat_id)
+
+
+TEXT_SHORTCUTS = {"меню": "main_menu", "главное меню": "main_menu", "start": "main_menu",
+                  "заказать": "order", "заказ": "order", "заказать шоу": "order",
+                  "контакты": "contact", "видео": "video"}
 
 
 def on_message(msg):
     chat = msg.get("chat", {})
     if chat.get("type") != "private":
-        return  # в группах и каналах бот не отвечает
+        return
     chat_id = chat["id"]
     user = msg.get("from", {})
+    storage.touch_user(user)
+
+    # Номер, отправленный кнопкой
+    if msg.get("contact"):
+        contact = dict(msg["contact"])
+        if contact.get("user_id") != user.get("id"):
+            contact["phone_number"] = f'{contact.get("phone_number", "")} (номер другого человека)'
+        res = order_form.process_contact(chat_id, contact)
+        if res is None and waiting_callback(chat_id):
+            res = callme_finish(chat_id, user, contact["phone_number"], contact.get("first_name"))
+        if res is None:
+            res = [("Спасибо! Чтобы менеджер перезвонил, нажмите «Перезвоните мне».", main_keyboard(chat_id))]
+        render(chat_id, res)
+        return
+
     text = (msg.get("text") or "").strip()
     if not text:
-        tg.send_message(chat_id, "Я понимаю только текстовые сообщения 🙂", main_keyboard())
+        render(chat_id, [("Я понимаю текстовые сообщения 🙂 Выберите раздел:", main_keyboard(chat_id))])
         return
-    logger.info("Сообщение от %s: %s", chat_id, text[:100])
+    logger.info("Сообщение от %s (%s симв.)", chat_id, len(text))
 
     if text.startswith("/"):
         cmd = text.split()[0].split("@")[0].lower()
-        if cmd == "/start":
-            ai_sessions.pop(chat_id, None)
-            show_start(chat_id, user)
-        elif cmd == "/cancel":
-            ai_sessions.pop(chat_id, None)
-            t, kb = order_form.cancel(chat_id)
-            tg.send_message(chat_id, t, kb)
-        elif cmd == "/myid":
-            tg.send_message(chat_id, f"Ваш Telegram ID: <code>{chat_id}</code>")
-        elif cmd in COMMANDS:
-            if cmd != "/oasis":
-                ai_sessions.pop(chat_id, None)
-            COMMANDS[cmd](chat_id, user)
+        render(chat_id, on_command(chat_id, user, cmd))
+        return
+
+    # Администратор пишет ответ клиенту
+    if admin.is_admin(chat_id) and admin.awaiting_reply(chat_id):
+        admin.send_to_client(chat_id, text)
+        return
+    # Клиент отвечает менеджеру
+    if admin.client_awaiting(chat_id):
+        if admin.forward_client_reply(chat_id, text):
+            render(chat_id, [("✅ Передали менеджеру. Он ответит здесь же.", back_kb())])
         else:
-            show_help(chat_id)
+            render(chat_id, [("⚠️ Не удалось передать сообщение. Напишите менеджеру напрямую.",
+                              back_kb(manager_row()))])
         return
-
+    # Заполнение заявки
     if order_form.is_filling(chat_id):
-        t, kb = order_form.process_text(chat_id, text)
-        if t:
-            tg.send_message(chat_id, t, kb)
+        res = order_form.process_text(chat_id, text)
+        if res:
+            render(chat_id, res)
             return
-
-    if chat_id in ai_sessions:
-        ai_message(chat_id, text)
+    # Ждём номер для обратного звонка
+    if waiting_callback(chat_id):
+        if text == order_form.BTN_CANCEL or text.lower() in ("отмена", "отменить"):
+            render(chat_id, cancel_all(chat_id))
+            return
+        phone = order_form._parse_phone(text)
+        if phone:
+            render(chat_id, callme_finish(chat_id, user, phone))
+        else:
+            render(chat_id, [("⚠️ Не похоже на номер. Нажмите «Отправить номер» или напишите номер, "
+                              "например +7 900 123-45-67. Отмена — /cancel", None)])
         return
 
-    handler = TEXT_SHORTCUTS.get(text.lower())
-    if handler:
-        handler(chat_id, user)
+    key = TEXT_SHORTCUTS.get(text.lower())
+    if key:
+        render(chat_id, on_callback_data(chat_id, user, key))
         return
+    render(chat_id, ai_answer(chat_id, text))
 
-    rows = [manager_row(), back_row()]
-    if ai.is_available():
-        rows.insert(0, [{"text": "🤖 Спросить ассистента", "callback_data": "oasis"}])
-        reply = "Хотите задать вопрос виртуальному ассистенту Oasis Dance или написать менеджеру?"
-    else:
-        reply = "Чтобы задать вопрос, напишите нашему менеджеру или выберите раздел в меню."
-    tg.send_message(chat_id, reply, {"inline_keyboard": rows})
+
+def on_callback_data(chat_id, user, data):
+    """Кнопки клиента. Возвращает список сообщений."""
+    if data == "main_menu":
+        return start_screen(chat_id, user)
+    if data == "order":
+        return order_form.start(chat_id, user)
+    if data == "callme":
+        return callme_start(chat_id)
+    if data == "ask":
+        return ask_screen()
+    if data == "video":
+        return video_screen()
+    if data == "contact":
+        return contact_screen()
+    if data == "partnership":
+        return partnership_screen()
+    if data == "forget_yes":
+        storage.forget_user(chat_id)
+        return [("🗑 Ваши данные удалены. Если захотите вернуться — нажмите /start.", None)]
+    return start_screen(chat_id, user)
 
 
 def on_callback(cq):
-    tg.answer_callback(cq["id"])
     msg = cq.get("message") or {}
     chat_id = msg.get("chat", {}).get("id")
+    message_id = msg.get("message_id")
     data = cq.get("data") or ""
     user = cq.get("from", {})
-    if not chat_id:
+    if not chat_id or (msg.get("chat") or {}).get("type") != "private" or chat_id != user.get("id"):
+        tg.answer_callback(cq["id"])
         return
-    if data == "order" or data.startswith("order_"):
-        ai_sessions.pop(chat_id, None)
-        t, kb = order_form.handle_callback(chat_id, data, user)
-        tg.send_message(chat_id, t, kb)
+    storage.touch_user(user)
+
+    if data.startswith("adm_"):
+        if not admin.is_admin(chat_id):
+            tg.answer_callback(cq["id"], "Недоступно")
+            return
+        tg.answer_callback(cq["id"])
+        res = admin.handle_callback(chat_id, message_id, data)
+        if res:
+            tg.edit_message(chat_id, message_id, *res)
         return
-    CALLBACKS.get(data, show_start)(chat_id, user)
+
+    if data.startswith("cli_rep_"):
+        tg.answer_callback(cq["id"])
+        try:
+            ok = admin.client_start_reply(chat_id, int(data[8:]))
+        except ValueError:
+            ok = False
+        tg.send_message(chat_id, "✍️ Напишите ответ менеджеру одним сообщением. Отмена — /cancel"
+                        if ok else "Эта переписка уже недоступна. Напишите менеджеру напрямую.")
+        return
+
+    tg.answer_callback(cq["id"])
+    if data.startswith("of_"):
+        render(chat_id, order_form.handle_callback(chat_id, data, user), message_id)
+        return
+    if data == "order" and order_form.is_filling(chat_id):
+        render(chat_id, order_form.start(chat_id, user), message_id)
+        return
+    # Разделы меню открываем на месте текущего сообщения, чтобы не засорять чат
+    edit = message_id if data not in ("callme",) else None
+    render(chat_id, on_callback_data(chat_id, user, data), edit)
+
+
+# ---------- профиль бота в Telegram ----------
+
+USER_COMMANDS = [
+    ("start", "Главное меню"), ("order", "Заказать выступление"), ("callme", "Перезвоните мне"),
+    ("video", "Видео и фото"), ("contact", "Контакты"), ("privacy", "Персональные данные"),
+    ("help", "Помощь"),
+]
+ADMIN_COMMANDS = USER_COMMANDS + [("admin", "Кабинет заявок"), ("orders", "Новые заявки"), ("stats", "Статистика")]
+DESCRIPTION = ("Шоу-балет Oasis Dance — шоу-балет премиум-класса для свадеб, корпоративов и праздников.\n\n"
+               "Здесь можно оставить заявку на выступление за минуту, попросить перезвонить "
+               "или задать вопрос ассистенту.")
+SHORT_DESCRIPTION = "Шоу-балет Oasis Dance: заявка на выступление за минуту 💃"
+
+
+def setup_profile():
+    def cmds(lst):
+        return [{"command": c, "description": d} for c, d in lst]
+    tg.call("setMyCommands", {"commands": cmds(USER_COMMANDS), "scope": {"type": "all_private_chats"}})
+    for admin_id in config.ADMIN_CHAT_IDS:
+        tg.call("setMyCommands", {"commands": cmds(ADMIN_COMMANDS), "scope": {"type": "chat", "chat_id": admin_id}})
+    cur = tg.call("getMyDescription") or {}
+    if (cur.get("result") or {}).get("description") != DESCRIPTION:
+        tg.call("setMyDescription", {"description": DESCRIPTION})
+    cur = tg.call("getMyShortDescription") or {}
+    if (cur.get("result") or {}).get("short_description") != SHORT_DESCRIPTION:
+        tg.call("setMyShortDescription", {"short_description": SHORT_DESCRIPTION})
+
+
+# ---------- запуск ----------
+
+_chat_locks = defaultdict(threading.Lock)
+
+
+def _chat_of(upd):
+    if "callback_query" in upd:
+        return ((upd["callback_query"].get("message") or {}).get("chat") or {}).get("id")
+    return (upd.get("message") or {}).get("chat", {}).get("id")
+
+
+def handle_update(upd):
+    # Сообщения одного чата обрабатываем по очереди, разных чатов — параллельно
+    with _chat_locks[_chat_of(upd)]:
+        try:
+            if "callback_query" in upd:
+                on_callback(upd["callback_query"])
+            elif "message" in upd:
+                on_message(upd["message"])
+        except Exception:
+            logger.error("Ошибка обработки обновления:\n%s", traceback.format_exc())
+
+
+def background():
+    while True:
+        try:
+            admin.check_abandoned()
+        except Exception:
+            logger.error("Ошибка фоновой проверки:\n%s", traceback.format_exc())
+        time.sleep(60)
 
 
 def run():
     if not config.TELEGRAM_BOT_TOKEN:
         logger.error("Не задан TELEGRAM_BOT_TOKEN в файле .env")
         sys.exit(1)
-
     me = tg.call("getMe")
     if not (me and me.get("ok")):
         logger.error("Не удалось подключиться к Telegram (проверьте токен и интернет на сервере)")
         sys.exit(1)
+
+    imported = storage.migrate_jsonl(os.path.join(config.DATA_DIR, "orders.jsonl"))
+    if imported:
+        logger.info("Перенесено заявок из прошлой версии: %s", imported)
     logger.info("Бот @%s запущен. ИИ-ассистент: %s. Администраторы: %s",
                 me["result"]["username"], "включён" if ai.is_available() else "выключен",
                 config.ADMIN_CHAT_IDS or "не заданы")
-
-    # Если где-то был настроен webhook, getUpdates не работает — снимаем его
     tg.call("deleteWebhook", {"drop_pending_updates": False})
+    try:
+        setup_profile()
+    except Exception:
+        logger.error("Не удалось обновить профиль бота:\n%s", traceback.format_exc())
+    threading.Thread(target=background, daemon=True).start()
 
+    pool = ThreadPoolExecutor(max_workers=8)
     offset = None
     while True:
         try:
@@ -319,13 +525,7 @@ def run():
                 continue
             for upd in resp["result"]:
                 offset = upd["update_id"] + 1
-                try:
-                    if "callback_query" in upd:
-                        on_callback(upd["callback_query"])
-                    elif "message" in upd:
-                        on_message(upd["message"])
-                except Exception:
-                    logger.error("Ошибка обработки обновления:\n%s", traceback.format_exc())
+                pool.submit(handle_update, upd)
         except KeyboardInterrupt:
             logger.info("Остановлено")
             break

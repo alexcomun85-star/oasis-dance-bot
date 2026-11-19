@@ -1,269 +1,321 @@
 """
-Пошаговая форма заказа выступления.
-Незавершённые формы хранятся в data/order_forms.json, готовые заявки — в data/orders.jsonl.
+Короткая заявка на выступление: 6 шагов, календарь, номер телефона одной кнопкой.
+Функции возвращают список сообщений [(текст, клавиатура), ...] — их отправляет bot.py.
 """
+import calendar
 import html
-import json
-import logging
-import os
-import threading
-from datetime import datetime
+import re
+from datetime import date, datetime
 
+import admin
 import config
-import tg
+import storage
 
-logger = logging.getLogger(__name__)
+MONTHS = ["Январь", "Февраль", "Март", "Апрель", "Май", "Июнь", "Июль",
+          "Август", "Сентябрь", "Октябрь", "Ноябрь", "Декабрь"]
 
-FORMS_FILE = os.path.join(config.DATA_DIR, "order_forms.json")
-ORDERS_FILE = os.path.join(config.DATA_DIR, "orders.jsonl")
-_lock = threading.Lock()
-
-FIELDS = [
-    ("event_type", "Тип мероприятия",
-     "Выберите тип мероприятия или напишите свой вариант."),
-    ("event_date", "Дата мероприятия",
-     "Укажите дату мероприятия в формате ДД.ММ.ГГГГ (например: 15.06.2027)."),
-    ("event_time", "Время начала",
-     "Укажите время начала в формате ЧЧ:ММ (например: 18:00)."),
-    ("event_location", "Место проведения",
-     "Укажите город и адрес или название площадки."),
-    ("guest_count", "Количество гостей",
-     "Укажите примерное количество гостей (числом)."),
-    ("program_type", "Программа",
-     "Выберите программу или опишите свои пожелания."),
-    ("contact_name", "Ваше имя",
-     "Как к вам обращаться?"),
-    ("contact_phone", "Телефон",
-     "Укажите контактный телефон."),
-    ("additional_info", "Дополнительно",
-     "Особые пожелания (или напишите «нет»)."),
+# Шаги: ключ, название в сводке, вопрос
+STEPS = [
+    ("event_type", "Мероприятие", "🎉 <b>Шаг 1 из 6.</b> Какое у вас мероприятие?\nВыберите или напишите своё."),
+    ("event_date", "Дата", "📅 <b>Шаг 2 из 6.</b> Выберите дату мероприятия."),
+    ("event_location", "Место", "📍 <b>Шаг 3 из 6.</b> Где пройдёт мероприятие?\nНапишите город и площадку (можно кратко)."),
+    ("program", "Программа", "💃 <b>Шаг 4 из 6.</b> Какая программа интересует?"),
+    ("contact_phone", "Телефон", "📱 <b>Шаг 5 из 6.</b> Как с вами связаться?\n"
+                                 "Нажмите кнопку «Отправить номер» внизу экрана или напишите номер."),
+    ("comment", "Пожелания", "✍️ <b>Шаг 6 из 6.</b> Есть пожелания? Напишите их или нажмите «Пропустить»."),
 ]
+KEYS = [s[0] for s in STEPS]
+CONTACT_STEP = KEYS.index("contact_phone")
 
 OPTIONS = {
     "event_type": ["Свадьба", "Корпоратив", "День рождения", "Юбилей", "Выпускной",
-                   "Открытие", "Презентация", "Вечеринка", "Другое"],
-    "program_type": ["Стандартная (2–3 номера)", "Расширенная (4–5 номеров)",
-                     "Индивидуальная программа", "Интерактивное шоу", "Мастер-класс"],
+                   "Открытие / презентация", "Частный праздник", "Другое"],
+    "program": ["Стандартная (2–3 номера)", "Расширенная (4–5 номеров)",
+                "Индивидуальная программа", "Пока не знаю — помогите выбрать"],
 }
 
+BTN_SEND_PHONE = "📱 Отправить номер"
+BTN_TG_ONLY = "✉️ Лучше написать в Telegram"
+BTN_BACK = "⬅️ Назад"
+BTN_CANCEL = "❌ Отменить"
+TG_ONLY_VALUE = "не указан — связаться в Telegram"
 
-# ---------- хранение ----------
-
-def _load() -> dict:
-    try:
-        with open(FORMS_FILE, encoding="utf-8") as f:
-            return json.load(f)
-    except FileNotFoundError:
-        return {}
-    except Exception as e:
-        logger.error("Не удалось прочитать формы: %s", e)
-        return {}
+REMOVE_KB = {"remove_keyboard": True}
+LIMIT_MSG = [("Вы уже отправили несколько заявок — менеджер с вами свяжется. "
+              "Если срочно — напишите ему напрямую.", None)]
+MENU_KB = {"inline_keyboard": [[{"text": "🏠 Главное меню", "callback_data": "main_menu"}]]}
 
 
-_forms = _load()
+def consent_line() -> str:
+    return ("\n\n<i>Отправляя данные, вы соглашаетесь на обработку персональных данных "
+            f"({html.escape(config.OPERATOR_NAME)}) для связи по заявке. Подробнее: /privacy</i>")
 
 
-def _save():
-    with _lock:
-        tmp = FORMS_FILE + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(_forms, f, ensure_ascii=False, indent=1)
-        os.replace(tmp, FORMS_FILE)
+# ---------- клавиатуры ----------
 
-
-def _get(chat_id):
-    return _forms.get(str(chat_id))
-
-
-def _delete(chat_id):
-    if _forms.pop(str(chat_id), None) is not None:
-        _save()
-
-
-def is_filling(chat_id) -> bool:
-    f = _get(chat_id)
-    return bool(f) and f["step"] < len(FIELDS)
-
-
-# ---------- клавиатуры и тексты ----------
-
-def _step_keyboard(step: int) -> dict:
-    rows = []
-    key = FIELDS[step][0]
-    # В callback_data передаём номер варианта, а не текст: лимит Telegram — 64 байта
-    for i, opt in enumerate(OPTIONS.get(key, [])):
-        rows.append([{"text": opt, "callback_data": f"order_opt_{i}"}])
-    nav = []
+def _nav(step):
+    row = []
     if step > 0:
-        nav.append({"text": "◀️ Назад", "callback_data": "order_prev"})
-    nav.append({"text": "❌ Отменить", "callback_data": "order_cancel"})
-    rows.append(nav)
+        row.append({"text": "⬅️ Назад", "callback_data": "of_back"})
+    row.append({"text": "❌ Отменить", "callback_data": "of_cancel"})
+    return row
+
+
+def _options_kb(step):
+    key = KEYS[step]
+    opts = OPTIONS[key]
+    rows, row = [], []
+    for i, opt in enumerate(opts):
+        row.append({"text": opt, "callback_data": f"of_opt_{i}"})
+        if len(row) == 2 or len(opt) > 14:
+            rows.append(row)
+            row = []
+    if row:
+        rows.append(row)
+    rows.append(_nav(step))
     return {"inline_keyboard": rows}
 
 
-def _confirm_keyboard() -> dict:
+def calendar_kb(year: int, month: int, step: int):
+    today = date.today()
+    rows = [[{"text": f"{MONTHS[month - 1]} {year}", "callback_data": "of_noop"}],
+            [{"text": d, "callback_data": "of_noop"} for d in ("Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс")]]
+    for week in calendar.monthcalendar(year, month):
+        row = []
+        for d in week:
+            if d == 0:
+                row.append({"text": " ", "callback_data": "of_noop"})
+            elif date(year, month, d) < today:
+                row.append({"text": "·", "callback_data": "of_noop"})
+            else:
+                row.append({"text": str(d), "callback_data": f"of_day_{year}-{month:02d}-{d:02d}"})
+        rows.append(row)
+    prev_y, prev_m = (year, month - 1) if month > 1 else (year - 1, 12)
+    next_y, next_m = (year, month + 1) if month < 12 else (year + 1, 1)
+    nav = []
+    if (prev_y, prev_m) >= (today.year, today.month):
+        nav.append({"text": "◀️", "callback_data": f"of_cal_{prev_y}-{prev_m:02d}"})
+    nav.append({"text": "▶️", "callback_data": f"of_cal_{next_y}-{next_m:02d}"})
+    rows.append(nav)
+    rows.append([{"text": "🤷 Дата пока не известна", "callback_data": "of_nodate"}])
+    rows.append(_nav(step))
+    return {"inline_keyboard": rows}
+
+
+def contact_kb():
+    return {"keyboard": [[{"text": BTN_SEND_PHONE, "request_contact": True}],
+                         [{"text": BTN_TG_ONLY}],
+                         [{"text": BTN_BACK}, {"text": BTN_CANCEL}]],
+            "resize_keyboard": True, "one_time_keyboard": True}
+
+
+def _confirm_kb():
     return {"inline_keyboard": [
-        [{"text": "✅ Подтвердить заказ", "callback_data": "order_confirm"}],
-        [{"text": "✏️ Заполнить заново", "callback_data": "order_edit"}],
-        [{"text": "❌ Отменить", "callback_data": "order_cancel"}],
+        [{"text": "✅ Отправить заявку", "callback_data": "of_confirm"}],
+        [{"text": "✏️ Изменить", "callback_data": "of_restart"}, {"text": "❌ Отменить", "callback_data": "of_cancel"}],
     ]}
 
 
-MENU_KB = {"inline_keyboard": [[{"text": "◀️ В главное меню", "callback_data": "main_menu"}]]}
+# ---------- вывод шага ----------
+
+def _one_line(value) -> str:
+    return html.escape(" ".join(str(value).split()))
 
 
-def _summary(form: dict) -> str:
-    lines = ["📋 <b>Заявка на выступление</b>\n"]
-    for key, name, _ in FIELDS:
-        if key in form["data"]:
-            lines.append(f"<b>{name}:</b> {html.escape(form['data'][key])}")
+def summary(data: dict) -> str:
+    lines = []
+    for key, name, _ in STEPS:
+        if data.get(key):
+            lines.append(f"<b>{name}:</b> {_one_line(data[key])}")
+    if data.get("contact_name"):
+        lines.append(f"<b>Имя:</b> {_one_line(data['contact_name'])}")
     return "\n".join(lines)
 
 
-def _ask(form: dict, prefix: str = ""):
+def _ask(form, prefix=""):
     step = form["step"]
-    if step >= len(FIELDS):
-        return _summary(form) + "\n\nПроверьте данные и подтвердите заказ.", _confirm_keyboard()
-    return prefix + FIELDS[step][2], _step_keyboard(step)
-
-
-# ---------- валидация ----------
-
-def _validate(key: str, value: str):
-    value = value.strip()
-    if not value:
-        return None
+    if step >= len(STEPS):
+        return [("📋 <b>Проверьте заявку</b>\n\n" + summary(form["data"]) + consent_line(), _confirm_kb())]
+    key, _, question = STEPS[step]
+    text = prefix + question
+    if key in OPTIONS:
+        return [(text, _options_kb(step))]
     if key == "event_date":
-        try:
-            d = datetime.strptime(value, "%d.%m.%Y")
-        except ValueError:
-            return None
-        if d.date() < datetime.now().date():
-            return None
-    elif key == "event_time":
-        try:
-            datetime.strptime(value, "%H:%M")
-        except ValueError:
-            return None
-    elif key == "guest_count":
-        if not value.isdigit():
-            return None
-    return value[:500]
+        t = date.today()
+        return [(text, calendar_kb(t.year, t.month, step))]
+    if key == "contact_phone":
+        return [(text + consent_line(), contact_kb())]
+    if key == "comment":
+        return [(text, {"inline_keyboard": [[{"text": "Пропустить ➡️", "callback_data": "of_skip"}], _nav(step)]})]
+    return [(text, {"inline_keyboard": [_nav(step)]})]
+
+
+def _advance(chat_id, form, key, value):
+    leaving_contact = form["step"] == CONTACT_STEP
+    form["data"][key] = value
+    form["step"] += 1
+    storage.save_form(chat_id, form)
+    msgs = _ask(form, "✅ Принято.\n\n")
+    if leaving_contact:
+        msgs.insert(0, ("Спасибо! 👍", REMOVE_KB))
+    return msgs
 
 
 # ---------- публичные функции ----------
 
-def start(chat_id, user: dict):
-    f = _get(chat_id)
-    if f and f["step"] < len(FIELDS):
-        return ("У вас есть незавершённая заявка. Продолжить или начать заново?",
-                {"inline_keyboard": [
-                    [{"text": "✏️ Продолжить", "callback_data": "order_continue"}],
-                    [{"text": "🔄 Начать заново", "callback_data": "order_restart"}],
-                    [{"text": "❌ Отменить", "callback_data": "order_cancel"}],
-                ]})
-    form = {"user": {k: user.get(k) for k in ("id", "username", "first_name", "last_name")},
-            "data": {}, "step": 0}
-    _forms[str(chat_id)] = form
-    _save()
-    return _ask(form, "📝 <b>Заказ выступления шоу-балета Oasis Dance</b>\n\n"
-                      "Ответьте на несколько вопросов. Отменить можно в любой момент командой /cancel.\n\n")
+def is_filling(chat_id) -> bool:
+    f = storage.get_form(chat_id)
+    return bool(f) and f["step"] < len(STEPS)
+
+
+def form_step(chat_id):
+    f = storage.get_form(chat_id)
+    return f["step"] if f else None
+
+
+def start(chat_id, user: dict, force_new=False):
+    f = storage.get_form(chat_id)
+    if f and not force_new and 0 < f["step"]:
+        return [("У вас есть незаконченная заявка. Продолжим?", {"inline_keyboard": [
+            [{"text": "✏️ Продолжить", "callback_data": "of_continue"}],
+            [{"text": "🔄 Начать заново", "callback_data": "of_restart"}],
+            [{"text": "❌ Отменить", "callback_data": "of_cancel"}]]})]
+    storage.delete_form(chat_id)  # новая форма — заново следим, не брошена ли она
+    form = {"step": 0, "data": {}, "user": {k: user.get(k) for k in ("id", "username", "first_name", "last_name")}}
+    if user.get("first_name"):
+        form["data"]["contact_name"] = " ".join(x for x in (user.get("first_name"), user.get("last_name")) if x)
+    storage.save_form(chat_id, form)
+    return _ask(form, "🎭 <b>Заявка на выступление</b>\nВсего 6 коротких вопросов — около минуты.\n\n")
 
 
 def cancel(chat_id):
-    _delete(chat_id)
-    return "❌ Заполнение заявки отменено.", MENU_KB
+    storage.delete_form(chat_id)
+    return [("❌ Заявка отменена.", REMOVE_KB), ("Чем ещё помочь?", MENU_KB)]
+
+
+def _parse_phone(text: str):
+    digits = re.sub(r"\D", "", text)
+    if 10 <= len(digits) <= 15:
+        return text.strip()
+    return None
 
 
 def process_text(chat_id, text: str):
-    form = _get(chat_id)
-    if not form or form["step"] >= len(FIELDS):
-        return None, None
-    if text.strip().lower() in ("/cancel", "отмена", "отменить", "cancel"):
+    form = storage.get_form(chat_id)
+    if not form or form["step"] >= len(STEPS):
+        return None
+    t = text.strip()
+    if t in (BTN_CANCEL, "/cancel") or t.lower() in ("отмена", "отменить"):
         return cancel(chat_id)
-    key, name, _ = FIELDS[form["step"]]
-    value = _validate(key, text)
-    if value is None:
-        return f"⚠️ Не удалось принять значение для поля «{name}».\n\n{FIELDS[form['step']][2]}", \
-            _step_keyboard(form["step"])
-    form["data"][key] = value
-    form["step"] += 1
-    _save()
-    return _ask(form, "✅ Принято.\n\n")
+    if t == BTN_BACK:
+        return go_back(chat_id)
+    step = form["step"]
+    key = KEYS[step]
+
+    if key == "contact_phone":
+        if t == BTN_TG_ONLY:
+            return _advance(chat_id, form, key, TG_ONLY_VALUE)
+        phone = _parse_phone(t)
+        if not phone:
+            return [("⚠️ Не похоже на номер телефона. Нажмите «Отправить номер» или напишите номер, "
+                     "например +7 900 123-45-67.", contact_kb())]
+        return _advance(chat_id, form, key, phone)
+
+    if key == "event_date":
+        try:
+            d = datetime.strptime(t, "%d.%m.%Y").date()
+            if d < date.today():
+                return [("⚠️ Эта дата уже прошла. Выберите дату в календаре.", _ask(form)[0][1])]
+            t = d.strftime("%d.%m.%Y")
+        except ValueError:
+            pass  # свободный ответ вроде «в середине июня» тоже принимаем
+    return _advance(chat_id, form, key, t[:300])
+
+
+def process_contact(chat_id, contact: dict):
+    """Номер, отправленный кнопкой «Отправить номер». Возвращает None, если форма не ждёт номер."""
+    form = storage.get_form(chat_id)
+    if not form or form["step"] != CONTACT_STEP:
+        return None
+    if contact.get("first_name") and not form["data"].get("contact_name"):
+        form["data"]["contact_name"] = contact["first_name"]
+    return _advance(chat_id, form, "contact_phone", contact.get("phone_number", ""))
+
+
+def go_back(chat_id):
+    form = storage.get_form(chat_id)
+    if not form:
+        return [("Заявка не найдена.", MENU_KB)]
+    was_contact = form["step"] == CONTACT_STEP
+    form["step"] = max(0, form["step"] - 1)
+    storage.save_form(chat_id, form)
+    msgs = _ask(form, "⬅️ Вернулись назад.\n\n")
+    if was_contact:
+        msgs.insert(0, ("Хорошо.", REMOVE_KB))
+    return msgs
 
 
 def handle_callback(chat_id, data: str, user: dict):
-    """Возвращает (текст, клавиатура) для callback вида order_*."""
-    form = _get(chat_id)
-
-    if data in ("order", "order_start"):
-        return start(chat_id, user)
-    if data == "order_cancel":
+    """Обрабатывает кнопки of_*. Возвращает список сообщений или None (ничего не делать)."""
+    if data == "of_noop":
+        return None
+    if data == "of_cancel":
         return cancel(chat_id)
-    if data == "order_restart":
-        _delete(chat_id)
-        return start(chat_id, user)
-    if not form:
-        return start(chat_id, user)
+    if data == "of_restart":
+        return start(chat_id, user, force_new=True)
 
-    if data == "order_continue":
+    form = storage.get_form(chat_id)
+    if not form:
+        if data == "of_confirm":
+            return [("Эта заявка уже отправлена ✅", MENU_KB)]
+        return start(chat_id, user)
+    if data == "of_continue":
         return _ask(form, "📝 Продолжаем.\n\n")
-    if data == "order_prev":
-        form["step"] = max(0, form["step"] - 1)
-        _save()
-        return _ask(form, "⬅️ Вернулись к предыдущему вопросу.\n\n")
-    if data.startswith("order_opt_"):
-        if form["step"] >= len(FIELDS):
-            return _ask(form)
-        key = FIELDS[form["step"]][0]
-        opts = OPTIONS.get(key, [])
+    if data == "of_back":
+        return go_back(chat_id)
+
+    if form["step"] >= len(STEPS):
+        if data == "of_confirm":
+            return submit(chat_id, form)
+        return _ask(form)
+
+    key = KEYS[form["step"]]
+    if data.startswith("of_opt_") and key in OPTIONS:
         try:
-            form["data"][key] = opts[int(data[len("order_opt_"):])]
+            return _advance(chat_id, form, key, OPTIONS[key][int(data[7:])])
         except (ValueError, IndexError):
             return _ask(form)
-        form["step"] += 1
-        _save()
-        return _ask(form, "✅ Принято.\n\n")
-    if data == "order_edit":
-        form["step"] = 0
-        form["data"] = {}
-        _save()
-        return _ask(form, "✏️ Заполняем заново.\n\n")
-    if data == "order_confirm" and form["step"] >= len(FIELDS):
-        _store_order(chat_id, form)
-        sent = _notify_admins(chat_id, form)
-        _delete(chat_id)
-        text = ("✅ <b>Заявка отправлена!</b>\n\n"
-                "Менеджер свяжется с вами в ближайшее время. Спасибо, что выбрали Oasis Dance!")
-        if not sent:
-            text += f"\n\nЕсли хотите ускорить ответ — напишите менеджеру: @{config.MANAGER_USERNAME}"
-        return text, MENU_KB
+    if data.startswith("of_cal_") and key == "event_date":
+        y, m = map(int, data[7:].split("-"))
+        return [(STEPS[form["step"]][2], calendar_kb(y, m, form["step"]))]
+    if data.startswith("of_day_") and key == "event_date":
+        d = datetime.strptime(data[7:], "%Y-%m-%d").date()
+        return _advance(chat_id, form, key, d.strftime("%d.%m.%Y"))
+    if data == "of_nodate" and key == "event_date":
+        return _advance(chat_id, form, key, "пока не известна")
+    if data == "of_skip" and key == "comment":
+        return _advance(chat_id, form, key, "—")
     return _ask(form)
 
 
-def _store_order(chat_id, form):
-    record = {"time": datetime.now().isoformat(timespec="seconds"), "chat_id": chat_id,
-              "user": form["user"], "data": form["data"]}
-    with _lock, open(ORDERS_FILE, "a", encoding="utf-8") as f:
-        f.write(json.dumps(record, ensure_ascii=False) + "\n")
-    logger.info("Новая заявка от %s сохранена", chat_id)
+def submit(chat_id, form):
+    if storage.too_many_submits(chat_id):
+        return LIMIT_MSG
+    order_id = storage.add_order(chat_id, "form", form["user"], form["data"])
+    storage.close_abandoned(chat_id)
+    storage.delete_form(chat_id)
+    storage.log_event(chat_id, "order")
+    sent = admin.notify_new(order_id)
+    text = (f"✅ <b>Заявка №{order_id} отправлена!</b>\n\n"
+            "Менеджер свяжется с вами в ближайшее время. Спасибо, что выбрали Oasis Dance! 💃")
+    if not sent:
+        text += f"\n\nЕсли хотите ускорить ответ — напишите менеджеру: @{config.MANAGER_USERNAME}"
+    return [(text, MENU_KB)]
 
 
-def _notify_admins(chat_id, form) -> bool:
-    if not config.ADMIN_CHAT_IDS:
-        logger.warning("ADMIN_CHAT_IDS не задан — уведомление о заявке никому не отправлено")
-        return False
-    u = form["user"]
-    who = html.escape(" ".join(x for x in (u.get("first_name"), u.get("last_name")) if x) or "Без имени")
-    if u.get("username"):
-        who += f" (@{html.escape(u['username'])})"
-    text = f"🔔 <b>Новая заявка</b> от {who}\n\n" + _summary(form)
-    kb = {"inline_keyboard": [[{"text": "📞 Открыть чат с клиентом", "url": f"tg://user?id={chat_id}"}]]}
-    ok = False
-    for admin in config.ADMIN_CHAT_IDS:
-        r = tg.send_message(admin, text, kb)
-        if not (r and r.get("ok")):
-            # Кнопка tg://user может не работать для скрытых профилей — шлём без неё
-            r = tg.send_message(admin, text)
-        ok = ok or bool(r and r.get("ok"))
-    return ok
+def abandoned_snapshot(chat_id):
+    """Данные незавершённой заявки для уведомления администратора."""
+    form = storage.get_form(chat_id)
+    if not form:
+        return None
+    return form
