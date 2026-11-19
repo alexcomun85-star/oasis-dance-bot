@@ -54,6 +54,11 @@ BOT_USERNAME = os.environ.get("BOT_USERNAME", "oasisdance_show_bot")  # уточ
 
 MANAGER_URL = f"https://t.me/{MANAGER_USERNAME}"
 
+# Запасной ИИ, если Gemini перегружен: любой сервис, совместимый с OpenAI (OpenAI, OpenRouter, DeepSeek)
+AI_FALLBACK_KEY = os.environ.get("AI_FALLBACK_KEY") or os.environ.get("OPENAI_API_KEY", "")
+AI_FALLBACK_URL = os.environ.get("AI_FALLBACK_URL", "https://api.openai.com/v1").rstrip("/")
+AI_FALLBACK_MODEL = os.environ.get("AI_FALLBACK_MODEL", "auto")
+
 # --- Ограничения ИИ (защита ключа Gemini от перерасхода) ---
 AI_LIMIT_PER_USER_HOUR = int(os.environ.get("AI_LIMIT_PER_USER_HOUR", "20"))
 AI_LIMIT_PER_DAY = int(os.environ.get("AI_LIMIT_PER_DAY", "500"))

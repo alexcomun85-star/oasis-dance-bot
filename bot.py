@@ -29,7 +29,8 @@ logger = logging.getLogger("oasis")
 class _RedactSecrets(logging.Filter):
     """Убирает токен бота и ключ Gemini из любых строк журнала (сетевые ошибки содержат адрес запроса)."""
     def filter(self, record):
-        secrets = [s for s in (config.TELEGRAM_BOT_TOKEN, config.GEMINI_API_KEY, config.VK_SERVICE_TOKEN) if s]
+        secrets = [s for s in (config.TELEGRAM_BOT_TOKEN, config.GEMINI_API_KEY, config.VK_SERVICE_TOKEN,
+                               config.AI_FALLBACK_KEY) if s]
         if secrets:
             msg = record.getMessage()
             for secret in secrets:

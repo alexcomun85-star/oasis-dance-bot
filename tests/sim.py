@@ -56,6 +56,18 @@ def _busy(url, **k):
     return _R(200, {"candidates": [{"content": {"parts": [{"text": "Привет"}]}}]})
 ai.requests.post = _busy
 assert ai.generate("тест") == "Привет" and len(_used) == 2, _used
+# Все модели Gemini перегружены — отвечает запасной ИИ
+config.AI_FALLBACK_KEY = "FALLBACKKEY"
+config.AI_FALLBACK_MODEL = "test-mini"
+def _all_busy(url, **k):
+    if "chat/completions" in url:
+        assert k["headers"]["Authorization"] == "Bearer FALLBACKKEY"
+        assert k["json"]["messages"][0]["role"] == "system"
+        return _R(200, {"choices": [{"message": {"content": "Ответ запасного ИИ"}}]})
+    return _R(503, {"error": {"code": 503}})
+ai.requests.post = _all_busy
+assert ai.generate("тест") == "Ответ запасного ИИ"
+config.AI_FALLBACK_KEY = ""
 ai.requests.post = _hang
 try:
     ai.generate("тест")

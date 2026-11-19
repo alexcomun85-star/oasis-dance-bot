@@ -96,7 +96,7 @@ def generate_post(topic: str) -> str:
 
 
 def is_available() -> bool:
-    return bool(config.GEMINI_API_KEY)
+    return bool(config.GEMINI_API_KEY or config.AI_FALLBACK_KEY)
 
 
 def generate(message: str, history: list = None) -> str:
@@ -159,7 +159,7 @@ def _call(system: str, contents: list, temperature: float, max_tokens: int,
         "generationConfig": {"temperature": temperature, "maxOutputTokens": max_tokens},
     }
     started = time.time()
-    for model in _candidates():
+    for model in (_candidates() if config.GEMINI_API_KEY else []):
         if time.time() - started > total_limit:
             break  # не держим человека дольше заданного времени в сумме
         try:
@@ -178,4 +178,54 @@ def _call(system: str, contents: list, temperature: float, max_tokens: int,
             continue  # пробуем следующую модель, если общий предел ещё не исчерпан
         except Exception as e:
             logger.error("Ошибка Gemini %s: %s", model, e)
-    raise RuntimeError("Gemini не вернул ответ")
+    if config.AI_FALLBACK_KEY:
+        left = max(10, total_limit - (time.time() - started))
+        try:
+            return _call_fallback(system, contents, timeout=min(read_timeout, left))
+        except Exception as e:
+            logger.error("Запасной ИИ не ответил: %s", e)
+    raise RuntimeError("ИИ не вернул ответ")
+
+
+# ---------- запасной ИИ (протокол OpenAI: OpenAI, OpenRouter, DeepSeek и др.) ----------
+
+_fallback_model = {"name": None}
+
+
+def _fallback_model_name():
+    if config.AI_FALLBACK_MODEL != "auto":
+        return config.AI_FALLBACK_MODEL
+    if _fallback_model["name"]:
+        return _fallback_model["name"]
+    name = "gpt-4o-mini"
+    if "api.openai.com" in config.AI_FALLBACK_URL:
+        try:
+            r = requests.get(config.AI_FALLBACK_URL + "/models", timeout=(5, 15),
+                             headers={"Authorization": f"Bearer {config.AI_FALLBACK_KEY}"})
+            ids = [m["id"] for m in r.json().get("data", [])]
+            minis = [i for i in ids if re.fullmatch(r"gpt-[\d.]+o?-mini", i)]
+            if minis:
+                minis.sort(key=lambda i: [float(x) for x in re.findall(r"\d+(?:\.\d+)?", i)], reverse=True)
+                name = minis[0]
+        except Exception as e:
+            logger.warning("Не удалось получить список моделей запасного ИИ: %s", e)
+    _fallback_model["name"] = name
+    return name
+
+
+def _call_fallback(system: str, contents: list, timeout: float) -> str:
+    messages = [{"role": "system", "content": system}]
+    for c in contents:
+        role = "assistant" if c.get("role") == "model" else "user"
+        messages.append({"role": role, "content": "".join(p.get("text", "") for p in c.get("parts", []))})
+    model = _fallback_model_name()
+    r = requests.post(config.AI_FALLBACK_URL + "/chat/completions", timeout=(5, timeout),
+                      headers={"Authorization": f"Bearer {config.AI_FALLBACK_KEY}"},
+                      json={"model": model, "messages": messages})
+    if r.status_code != 200:
+        raise RuntimeError(f"{model}: {r.status_code} {r.text[:200]}")
+    text = (r.json()["choices"][0]["message"].get("content") or "").strip()
+    if not text:
+        raise RuntimeError(f"{model}: пустой ответ")
+    logger.info("Ответил запасной ИИ (%s)", model)
+    return text.replace("**", "")
