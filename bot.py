@@ -227,14 +227,22 @@ def ai_answer(chat_id, text):
             or storage.count_events("ai", day_ago) >= config.AI_LIMIT_PER_DAY):
         return [("Ассистент сейчас отдыхает 🙂 Напишите, пожалуйста, менеджеру — он ответит.",
                  back_kb(manager_row()))]
-    tg.typing(chat_id)
     history = storage.get_history(chat_id)
+    stop = threading.Event()
+
+    def keep_typing():
+        while not stop.is_set():
+            tg.typing(chat_id)
+            stop.wait(4)
+    threading.Thread(target=keep_typing, daemon=True).start()
     try:
         answer = ai.generate(text, history)
     except Exception as e:
         logger.error("Ассистент не ответил: %s", e)
         return [("Извините, ассистент сейчас не может ответить. Напишите менеджеру — он поможет.",
                  back_kb(manager_row()))]
+    finally:
+        stop.set()
     storage.log_event(chat_id, "ai")
     storage.save_history(chat_id, history + [{"role": "user", "content": text},
                                              {"role": "assistant", "content": answer}])
@@ -524,6 +532,18 @@ def handle_update(upd):
             logger.error("Ошибка обработки обновления:\n%s", traceback.format_exc())
 
 
+_last_poll = [time.time()]
+WATCHDOG_SEC = 300
+
+
+def watchdog():
+    while True:
+        time.sleep(30)
+        if time.time() - _last_poll[0] > WATCHDOG_SEC:
+            logger.error("Приём сообщений не отвечает %s сек — перезапуск", WATCHDOG_SEC)
+            os._exit(1)  # systemd (Restart=always) поднимет бота заново
+
+
 def background():
     next_sources = time.time() + 60  # первая проверка соцсетей через минуту после запуска
     while True:
@@ -562,14 +582,17 @@ def run():
     except Exception:
         logger.error("Не удалось обновить профиль бота:\n%s", traceback.format_exc())
     threading.Thread(target=background, daemon=True).start()
+    threading.Thread(target=watchdog, daemon=True).start()
 
-    pool = ThreadPoolExecutor(max_workers=8)
+    pool = ThreadPoolExecutor(max_workers=16)
+    ack_pool = ThreadPoolExecutor(max_workers=4)  # мгновенно убирает «часики» на кнопках
     offset = None
     while True:
         try:
             params = {"timeout": 30, "allowed_updates": ["message", "callback_query"]}
             if offset:
                 params["offset"] = offset
+            _last_poll[0] = time.time()
             resp = tg.call("getUpdates", params, timeout=40)
             if not resp or not resp.get("ok"):
                 if resp and resp.get("error_code") == 409:
@@ -578,6 +601,8 @@ def run():
                 continue
             for upd in resp["result"]:
                 offset = upd["update_id"] + 1
+                if "callback_query" in upd:
+                    ack_pool.submit(tg.answer_callback, upd["callback_query"]["id"])
                 pool.submit(handle_update, upd)
         except KeyboardInterrupt:
             logger.info("Остановлено")

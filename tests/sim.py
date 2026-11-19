@@ -30,6 +30,22 @@ def fake(method, params=None, timeout=15):
 tg.call = fake
 import admin, ai, bot, config, order_form, storage  # noqa: E402,E401
 
+# Зависший Gemini: одна попытка с таймаутом, без ожидания запасной модели
+import requests as _rq  # noqa: E402
+_tries = []
+def _hang(*a, **k):
+    _tries.append(k.get("timeout"))
+    raise _rq.Timeout()
+_orig_post = ai.requests.post
+ai.requests.post = _hang
+try:
+    ai.generate("тест")
+except RuntimeError:
+    pass
+assert _tries == [(5, 30)], _tries
+ai.requests.post = _orig_post
+assert tg.answer_callback("x1") is not None and tg.answer_callback("x1") is None, "кнопка отвечается один раз"
+
 ai.generate = lambda m, h=None: "Ответ <тест> & **цена**"
 ai.generate_post = lambda topic: f"Пост про {topic} <b>"
 ai.rewrite_post = lambda original, src: "Переписано: " + original.split("http")[0][:2000]

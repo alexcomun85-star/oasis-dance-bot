@@ -69,7 +69,18 @@ def edit_message(chat_id, message_id, text: str, reply_markup: dict = None):
     return send_message(chat_id, text, reply_markup)
 
 
+_answered = set()
+_answered_lock = threading.Lock()
+
+
 def answer_callback(callback_id: str, text: str = None):
+    """Убирает «часики» на кнопке. Повторный ответ на ту же кнопку не отправляется."""
+    with _answered_lock:
+        if callback_id in _answered:
+            return None
+        _answered.add(callback_id)
+        if len(_answered) > 5000:
+            _answered.clear()
     params = {"callback_query_id": callback_id}
     if text:
         params["text"] = text

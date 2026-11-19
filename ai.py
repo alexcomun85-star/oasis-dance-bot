@@ -117,7 +117,7 @@ def _call(system: str, contents: list, temperature: float, max_tokens: int) -> s
     for model in models:
         try:
             r = requests.post(API.format(model=model), params={"key": config.GEMINI_API_KEY},
-                              json=body, timeout=60)
+                              json=body, timeout=(5, 30))
             if r.status_code != 200:
                 logger.error("Gemini %s: %s %s", model, r.status_code, r.text[:300])
                 continue
@@ -125,6 +125,9 @@ def _call(system: str, contents: list, temperature: float, max_tokens: int) -> s
             text = "".join(p.get("text", "") for p in parts).strip()
             if text:
                 return text.replace("**", "")
+        except requests.Timeout:
+            logger.error("Gemini %s не ответил за 30 секунд", model)
+            break  # сеть или сервис тормозят — не заставляем клиента ждать ещё и запасную модель
         except Exception as e:
             logger.error("Ошибка Gemini %s: %s", model, e)
     raise RuntimeError("Gemini не вернул ответ")
