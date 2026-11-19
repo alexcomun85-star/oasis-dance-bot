@@ -13,7 +13,7 @@ apt-get install -y -qq python3 python3-venv python3-pip >/dev/null
 echo "== 2/5 Создаю пользователя и папку =="
 id oasisbot >/dev/null 2>&1 || useradd --system --home "$APP" --shell /usr/sbin/nologin oasisbot
 mkdir -p "$APP/data"
-for f in bot.py config.py tg.py ai.py order_form.py admin.py storage.py channel.py sources.py ui.py extras.py \
+for f in bot.py config.py tg.py ai.py order_form.py admin.py storage.py channel.py sources.py ui.py extras.py calendar_ics.py \
          knowledge.md numbers.json requirements.txt; do
   cp "$SRC/$f" "$APP/"
 done
@@ -34,6 +34,12 @@ if [ ! -f "$APP/.env" ]; then
 fi
 chmod 600 "$APP/.env"
 chown -R oasisbot:oasisbot "$APP"
+
+# Порт для подписки на календарь выступлений с телефона
+CAL_PORT=$(grep -E '^CALENDAR_PORT=' "$APP/.env" | cut -d= -f2); CAL_PORT=${CAL_PORT:-8090}
+if [ "$CAL_PORT" != "0" ] && command -v ufw >/dev/null 2>&1 && ufw status | grep -q "Status: active"; then
+  ufw allow "$CAL_PORT"/tcp >/dev/null && echo "   Открыт порт $CAL_PORT для календаря"
+fi
 
 echo "== 5/5 Запускаю службу =="
 cp "$SRC/oasis-bot.service" /etc/systemd/system/oasis-bot.service

@@ -29,6 +29,35 @@ MAIN_REPLY_KB = {
 }
 
 
+# ---------- меню менеджера (только для администраторов) ----------
+
+ABTN_ORDERS = "📥 Заявки"
+ABTN_CAL = "📅 Календарь"
+ABTN_POST = "📢 Пост в канал"
+ABTN_SOURCES = "🔗 Соцсети → канал"
+ABTN_STATS = "📊 Статистика"
+ABTN_SETTINGS = "⚙️ Настройки"
+ABTN_TO_CLIENT = "👀 Как видит клиент"
+BTN_TO_MANAGER = "🧑‍💼 Вернуться в меню менеджера"
+
+ADMIN_BUTTONS = {ABTN_ORDERS: "adm_menu", ABTN_CAL: "adm_cal", ABTN_POST: "ch_menu", ABTN_SOURCES: "src_menu",
+                 ABTN_STATS: "adm_stats", ABTN_SETTINGS: "adm_settings"}
+
+MANAGER_REPLY_KB = {
+    "keyboard": [[{"text": ABTN_ORDERS}, {"text": ABTN_CAL}],
+                 [{"text": ABTN_POST}, {"text": ABTN_SOURCES}],
+                 [{"text": ABTN_STATS}, {"text": ABTN_SETTINGS}],
+                 [{"text": ABTN_TO_CLIENT}]],
+    "resize_keyboard": True,
+    "is_persistent": True,
+    "input_field_placeholder": "Меню менеджера",
+}
+
+# Клиентское меню, которое видит менеджер в режиме проверки, — с кнопкой возврата
+CLIENT_PREVIEW_KB = {**MAIN_REPLY_KB,
+                     "keyboard": MAIN_REPLY_KB["keyboard"] + [[{"text": BTN_TO_MANAGER}]]}
+
+
 def home_row():
     return [{"text": "🏠 В начало", "callback_data": "main_menu"}]
 

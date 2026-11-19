@@ -43,6 +43,7 @@ for _h in logging.getLogger().handlers:
     _h.addFilter(_RedactSecrets())
 
 import admin  # noqa: E402
+import calendar_ics  # noqa: E402
 import extras  # noqa: E402
 import ui  # noqa: E402
 import channel  # noqa: E402
@@ -83,8 +84,6 @@ def main_keyboard(chat_id=None):
         [{"text": ui.BTN_NUMBERS, "callback_data": "numbers"}, {"text": ui.BTN_ASK, "callback_data": "ask"}],
         [{"text": ui.BTN_CALLME, "callback_data": "callme"}, {"text": ui.BTN_MORE, "callback_data": "more"}],
     ]
-    if chat_id and admin.is_admin(chat_id):
-        rows.append([{"text": "🗂 Кабинет заявок", "callback_data": "adm_menu"}])
     return {"inline_keyboard": rows}
 
 
@@ -109,22 +108,56 @@ def welcome_text(user):
     return text
 
 
-def send_welcome(chat_id, user):
+def send_welcome(chat_id, user, kb=None):
     """Приветствие с баннером и нижним меню. Баннер загружается один раз, дальше — по file_id."""
+    kb = kb or ui.MAIN_REPLY_KB
     caption = welcome_text(user)
+    if kb is ui.CLIENT_PREVIEW_KB:
+        caption += "\n\n<i>Это режим просмотра для менеджера. Вернуться — кнопка внизу или /manager.</i>"
     photo = storage.get_setting("welcome_file_id") or (WELCOME_IMAGE if os.path.exists(WELCOME_IMAGE) else None)
     if photo:
-        r = tg.send_photo(chat_id, photo, caption, ui.MAIN_REPLY_KB)
+        r = tg.send_photo(chat_id, photo, caption, kb)
         if r and r.get("ok"):
             sizes = r["result"].get("photo") or []
             if sizes and not storage.get_setting("welcome_file_id"):
                 storage.set_setting("welcome_file_id", sizes[-1]["file_id"])
-            if admin.is_admin(chat_id):
-                tg.send_message(chat_id, "Для администратора:", {"inline_keyboard": [
-                    [{"text": "🗂 Кабинет заявок", "callback_data": "adm_menu"}]]})
             return
         storage.set_setting("welcome_file_id", "")
-    tg.send_message(chat_id, caption, ui.MAIN_REPLY_KB)
+    tg.send_message(chat_id, caption, kb)
+
+
+# ---------- режим менеджера ----------
+
+def manager_mode(chat_id) -> bool:
+    """Администратор по умолчанию видит меню менеджера; клиентское — только в режиме просмотра."""
+    return admin.is_admin(chat_id) and storage.get_setting(f"mode_{chat_id}", "manager") == "manager"
+
+
+def to_manager(chat_id, user):
+    storage.set_setting(f"mode_{chat_id}", "manager")
+    tg.send_message(chat_id, admin.manager_welcome(user), ui.MANAGER_REPLY_KB)
+
+
+def to_client_preview(chat_id, user):
+    storage.set_setting(f"mode_{chat_id}", "client")
+    send_welcome(chat_id, user, ui.CLIENT_PREVIEW_KB)
+
+
+def manager_button(chat_id, text):
+    key = ui.ADMIN_BUTTONS[text]
+    if key.startswith("adm_"):
+        res = admin.handle_callback(chat_id, None, key)
+    elif key == "ch_menu":
+        res = channel.start(chat_id)
+    else:
+        res = sources.status_screen()
+    if res:
+        tg.send_message(chat_id, *res)
+
+
+MANAGER_HINT = ("Это меню менеджера: здесь заявки, календарь, посты и настройки — кнопки внизу экрана.\n\n"
+                "• Перешлите сюда любой пост — подготовлю его для канала.\n"
+                "• Проверить, как бот отвечает клиентам, — «👀 Как видит клиент».")
 
 
 def start_screen(chat_id, user):
@@ -143,8 +176,8 @@ def help_screen(chat_id):
             "↩️ /cancel — отменить текущее действие\n")
     if ai.is_available():
         text += "\nЛюбой вопрос можно просто написать — ассистент ответит."
-    if admin.is_admin(chat_id):
-        text += ("\n\n<b>Для администратора:</b>\n/admin — кабинет заявок\n/orders — новые заявки\n"
+    if manager_mode(chat_id):
+        text += ("\n\n<b>Для менеджера:</b>\n/admin — кабинет заявок\n/orders — новые заявки\n"
                  "/stats — статистика\n/export — выгрузка в Excel\n/post — пост в канал\n"
                  "/sources — соцсети → канал\n/status — что подключено\n"
                  "Перешлите боту любой пост — он подготовит его для канала.")
@@ -160,8 +193,6 @@ def more_screen(chat_id):
         [{"text": "📤 Поделиться ботом", "url": share}],
         [{"text": "🔒 Персональные данные", "callback_data": "privacy"}, {"text": "❓ Помощь", "callback_data": "help"}],
     ]
-    if admin.is_admin(chat_id):
-        rows.append([{"text": "🗂 Кабинет заявок", "callback_data": "adm_menu"}])
     rows.append(ui.home_row())
     return [("☰ <b>Ещё</b>", {"inline_keyboard": rows})]
 
@@ -316,8 +347,19 @@ def on_command(chat_id, user, cmd):
     if cmd == "/start":
         admin.cancel_reply(chat_id)
         channel.cancel(chat_id)
-        send_welcome(chat_id, user)
+        if manager_mode(chat_id):
+            to_manager(chat_id, user)
+        elif admin.is_admin(chat_id):
+            send_welcome(chat_id, user, ui.CLIENT_PREVIEW_KB)
+        else:
+            send_welcome(chat_id, user)
         return []
+    if cmd == "/manager" and admin.is_admin(chat_id):
+        to_manager(chat_id, user)
+        return []
+    if manager_mode(chat_id) and cmd in ("/order", "/date", "/numbers", "/callme", "/ask", "/oasis",
+                                          "/video", "/contact", "/partnership"):
+        return [("Это раздел для клиентов. Чтобы посмотреть его, нажмите «👀 Как видит клиент».", None)]
     if cmd == "/cancel":
         channel.cancel(chat_id)
         return cancel_all(chat_id)
@@ -411,6 +453,11 @@ def on_message(msg):
         cmd = text.split()[0].split("@")[0].lower()
         if cmd == "/start" and len(text.split()) > 1:
             payload = text.split()[1][:20]
+            if payload.startswith("o_") and admin.is_admin(chat_id) and payload[2:].isdigit():
+                res = admin.handle_callback(chat_id, None, f"adm_open_{payload[2:]}_work")
+                if res:
+                    tg.send_message(chat_id, *res)
+                return
             storage.log_event(chat_id, "src_channel" if payload.startswith("ch") else "src_" + payload)
             target = {"ch_order": "order", "order": "order", "date": "date", "numbers": "numbers"}.get(payload)
             if target:
@@ -432,6 +479,21 @@ def on_message(msg):
             render(chat_id, [("⚠️ Не удалось передать сообщение. Напишите менеджеру напрямую.",
                               back_kb(manager_row()))])
         return
+    # Администратор: переключение режимов и меню менеджера (клиентский интерфейс сюда не попадает)
+    if admin.is_admin(chat_id):
+        if text == ui.ABTN_TO_CLIENT:
+            to_client_preview(chat_id, user)
+            return
+        if text == ui.BTN_TO_MANAGER:
+            to_manager(chat_id, user)
+            return
+        if manager_mode(chat_id):
+            if text in ui.ADMIN_BUTTONS:
+                manager_button(chat_id, text)
+            else:
+                tg.send_message(chat_id, MANAGER_HINT, ui.MANAGER_REPLY_KB)
+            return
+
     # Кнопки нижнего меню работают всегда (незаконченная заявка сохраняется)
     if text in ui.MENU_BUTTONS:
         with _state_lock:
@@ -556,6 +618,16 @@ def on_callback(cq):
             tg.send_message(chat_id, html.escape(note))
         return
 
+    if data.startswith("cal_my_"):
+        tg.answer_callback(cq["id"])
+        try:
+            order = storage.get_order(int(data[7:]))
+        except ValueError:
+            order = None
+        if order and order["chat_id"] == chat_id:
+            admin.send_order_ics(chat_id, order["id"], for_client=True)
+        return
+
     if data.startswith("cli_rep_"):
         tg.answer_callback(cq["id"])
         try:
@@ -590,7 +662,7 @@ USER_COMMANDS = [
 ADMIN_COMMANDS = USER_COMMANDS + [("admin", "Кабинет заявок"), ("orders", "Новые заявки"),
                                   ("stats", "Статистика"), ("post", "Пост в канал"),
                                   ("sources", "Соцсети → канал"), ("status", "Что подключено"),
-                                  ("export", "Заявки в Excel")]
+                                  ("export", "Заявки в Excel"), ("manager", "Меню менеджера")]
 DESCRIPTION = ("Шоу-балет Oasis Dance — шоу-балет премиум-класса для свадеб, корпоративов и праздников.\n\n"
                "Здесь можно оставить заявку на выступление за минуту, попросить перезвонить "
                "или задать вопрос ассистенту.")
@@ -686,6 +758,7 @@ def run():
         logger.error("Не удалось обновить профиль бота:\n%s", traceback.format_exc())
     threading.Thread(target=background, daemon=True).start()
     threading.Thread(target=watchdog, daemon=True).start()
+    calendar_ics.start_server()
 
     pool = ThreadPoolExecutor(max_workers=16)
     ack_pool = ThreadPoolExecutor(max_workers=4)  # мгновенно убирает «часики» на кнопках

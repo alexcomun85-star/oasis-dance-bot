@@ -5,7 +5,7 @@ import tempfile
 import time
 from datetime import date, timedelta
 
-os.environ.update(TELEGRAM_BOT_TOKEN="123:TESTTOKEN", ADMIN_CHAT_IDS="111, @EbruBekker", DATA_DIR=tempfile.mkdtemp(),
+os.environ.update(CALENDAR_PORT="0", PUBLIC_URL="http://1.2.3.4:8090", TELEGRAM_BOT_TOKEN="123:TESTTOKEN", ADMIN_CHAT_IDS="111, @EbruBekker", DATA_DIR=tempfile.mkdtemp(),
                   GEMINI_API_KEY="GEMTESTKEY", AI_LIMIT_PER_USER_HOUR="3")
 sys.path.insert(0, sys.argv[1] if len(sys.argv) > 1 else os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 
@@ -42,7 +42,7 @@ def fake_doc(chat_id, filename, data, caption=""):
 
 tg.send_photo = fake_photo
 tg.send_document = fake_doc
-import admin, ai, bot, config, order_form, storage  # noqa: E402,E401
+import admin, ai, bot, channel, config, order_form, storage  # noqa: E402,E401
 
 # Зависший Gemini: одна попытка с таймаутом, без ожидания запасной модели
 import requests as _rq  # noqa: E402
@@ -128,8 +128,12 @@ msg("/start")
 ph = [p for m, p in sent if m == "sendPhoto"][-1]
 assert ph["photo"].endswith("welcome.jpg") and "Аня" in ph["caption"] and ph["reply_markup"]["is_persistent"]
 msg("/start", A)
+assert "Меню менеджера" in last(111)["text"] and last(111)["reply_markup"]["keyboard"][0][0]["text"] == "📥 Заявки"
+msg("👀 Как видит клиент", A)
 assert [p for m, p in sent if m == "sendPhoto"][-1]["photo"] == "WELCOME_ID", "баннер грузится один раз"
-assert "adm_menu" in buttons(last(111))
+assert "Вернуться в меню менеджера" in str([p for m, p in sent if m == "sendPhoto"][-1]["reply_markup"])
+msg("🧑‍💼 Вернуться в меню менеджера", A)
+assert "Меню менеджера" in last(111)["text"]
 cb("video")
 assert sent[-1][0] == "editMessageText", "меню должно редактироваться на месте"
 
@@ -306,8 +310,8 @@ assert calls("copyMessage", n)[0]["reply_markup"]["inline_keyboard"][0][0]["text
 
 msg("/post", A)
 msg("/cancel", A)
-msg("Обычный вопрос", A)                                    # после отмены — снова ассистент
-assert last(111)["text"].startswith("Ответ")
+msg("Обычный вопрос", A)                                    # в меню менеджера ассистент не отвечает
+assert "меню менеджера" in last(111)["text"]
 
 msg("/start channel", D)
 assert storage.count_events("src_channel", 0) == 1
@@ -543,4 +547,72 @@ extras.morning_digest()
 assert len(sent) == n, "сводка раз в день"
 msg("/start numbers", F)
 assert "Номера и видео" in last(20)["text"]
+
+# --- меню менеджера отделено от клиентского
+for btn in ui.ADMIN_BUTTONS:
+    n = len(sent)
+    msg(btn, A)
+    assert any(p.get("chat_id") == 111 for m, p in sent[n:]), btn
+channel.cancel(111)
+n = len(sent)
+msg("📥 Заявки", F)                                   # клиенту меню менеджера недоступно
+assert "Кабинет заявок" not in str([p for m, p in sent[n:]])
+msg("/admin", F)
+assert "Кабинет заявок" not in last(20)["text"]
+msg("/order", A)
+assert "для клиентов" in last(111)["text"]
+
+# --- календарь
+import calendar_ics  # noqa: E402
+G = {"id": 30, "first_name": "Галя"}
+storage._q("DELETE FROM events WHERE chat_id=30", commit=True)
+dg = date.today() + timedelta(days=10)
+cb("order", G); cb("of_opt_1", G); cb(f"of_day_{dg:%Y-%m-%d}", G); msg("Москва, Ритц", G); cb("of_opt_0", G)
+msg("+7 900 111 22 33", G); cb("of_skip", G); cb("of_confirm", G)
+go = [o for o in storage.list_orders(["new"]) if o["chat_id"] == 30][0]
+cb(f"adm_st_{go['id']}_work", A)
+assert "принята в работу" in last(30)["text"] and f"cal_my_{go['id']}" in buttons(last(30))
+n = len(sent)
+cb(f"cal_my_{go['id']}", G)
+doc = [p for m, p in sent[n:] if m == "sendDocument"][0]
+ics = doc["data"].decode()
+assert doc["chat_id"] == 30 and "BEGIN:VCALENDAR" in ics and f"DTSTART;VALUE=DATE:{dg:%Y%m%d}" in ics
+assert "+7 900 111" not in ics, "в файле клиента нет телефона"
+n = len(sent)
+cb(f"cal_my_{go['id']}", F)                            # чужая заявка
+assert not [p for m, p in sent[n:] if m == "sendDocument"]
+n = len(sent)
+cb(f"adm_ics_{go['id']}", A)
+adoc = [p for m, p in sent[n:] if m == "sendDocument"][0]["data"].decode()
+assert "+7 900 111 22 33".replace(" ", "") in adoc.replace(" ", "").replace("\r\n", "")
+cb("adm_cal", A)
+assert dg.strftime("%d.%m") in last(111)["text"]
+cb("adm_calsub", A)
+assert "http://1.2.3.4:8090/cal/" in last(111)["text"] and "iPhone" in last(111)["text"]
+old = calendar_ics.secret()
+cb("adm_calreset", A)
+assert calendar_ics.secret() != old
+for line in ics.split("\r\n"):
+    assert len(line.encode()) <= 75, line
+
+# раздача календаря по ссылке
+from http.server import ThreadingHTTPServer  # noqa: E402
+import threading, urllib.request, urllib.error  # noqa: E401,E402
+srv = ThreadingHTTPServer(("127.0.0.1", 0), calendar_ics._Handler)
+threading.Thread(target=srv.serve_forever, daemon=True).start()
+base = f"http://127.0.0.1:{srv.server_address[1]}"
+body = urllib.request.urlopen(f"{base}/cal/{calendar_ics.secret()}.ics").read().decode()
+assert "Oasis Dance: Корпоратив" in body and "+7 900" not in body
+try:
+    urllib.request.urlopen(f"{base}/cal/wrong.ics")
+    assert False, "без секрета календарь не отдаётся"
+except urllib.error.HTTPError as e:
+    assert e.code == 404
+srv.shutdown()
+
+msg(f"/start o_{go['id']}", A)
+assert f"№{go['id']}" in last(111)["text"]
+n = len(sent)
+msg(f"/start o_{go['id']}", G)
+assert f"Заявка на выступление №{go['id']}" not in str(sent[n:])
 print("OK, вызовов API:", len(sent))

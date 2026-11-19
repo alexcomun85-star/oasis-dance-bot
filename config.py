@@ -86,6 +86,12 @@ SOURCE_CHECK_MINUTES = int(os.environ.get("SOURCE_CHECK_MINUTES", "20"))
 # 1 — публиковать в канал сразу, 0 — сначала присылать черновик администратору на одобрение
 AUTO_PUBLISH = os.environ.get("AUTO_PUBLISH", "0") == "1"
 
+# --- Календарь для телефона ---
+# Порт, на котором бот раздаёт календарь для подписки (0 — выключить). Должен быть открыт на сервере.
+CALENDAR_PORT = int(os.environ.get("CALENDAR_PORT", "8090"))
+# Внешний адрес сервера для ссылки на календарь; пусто — определить автоматически (http://IP:порт)
+PUBLIC_URL = os.environ.get("PUBLIC_URL", "")
+
 # --- Файлы данных ---
 DATA_DIR = os.environ.get(
     "DATA_DIR", os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")

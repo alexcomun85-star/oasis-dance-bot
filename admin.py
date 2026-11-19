@@ -3,6 +3,7 @@
 переписка с клиентом через бота.
 """
 import html
+import json
 import logging
 import threading
 import time
@@ -94,7 +95,8 @@ def card_kb(order, from_list: str = None):
         rows.append([{"text": "↩️ Вернуть в новые", "callback_data": f"adm_st_{oid}_new"}])
     else:
         rows.append([{"text": "↩️ Вернуть в работу", "callback_data": f"adm_st_{oid}_work"}])
-    rows.append([{"text": "💬 Написать клиенту", "callback_data": f"adm_msg_{oid}"}])
+    rows.append([{"text": "💬 Написать клиенту", "callback_data": f"adm_msg_{oid}"},
+                 {"text": "📲 В календарь", "callback_data": f"adm_ics_{oid}"}])
     if from_list:
         rows.append([{"text": "⬅️ К списку", "callback_data": f"adm_list_{from_list}_0"},
                      {"text": "🗂 Кабинет", "callback_data": "adm_menu"}])
@@ -142,8 +144,8 @@ def menu_screen():
          {"text": f"🔄 В работе ({n_work})", "callback_data": "adm_list_work_0"}],
         [{"text": "📁 Закрытые", "callback_data": "adm_list_closed_0"},
          {"text": "📊 Статистика", "callback_data": "adm_stats"}],
-        [{"text": "📊 Выгрузить в Excel", "callback_data": "adm_export"},
-         {"text": "⚙️ Что подключено", "callback_data": "adm_status"}],
+        [{"text": "📅 Календарь", "callback_data": "adm_cal"},
+         {"text": "📊 Выгрузить в Excel", "callback_data": "adm_export"}],
         [{"text": "📢 Пост в канал", "callback_data": "ch_menu"},
          {"text": "🔗 Соцсети → канал", "callback_data": "src_menu"}],
     ]}
@@ -228,6 +230,25 @@ def handle_callback(chat_id, message_id, data: str):
         return stats_screen()
     if data == "adm_status":
         return status_screen()
+    if data == "adm_cal":
+        return calendar_screen()
+    if data == "adm_calsub":
+        return calendar_subscribe_screen()
+    if data == "adm_calreset":
+        import calendar_ics
+        calendar_ics.reset_secret()
+        return calendar_subscribe_screen()
+    if data == "adm_calall":
+        import calendar_ics
+        data_ics = calendar_ics.build_ics(calendar_ics.calendar_orders(), with_phone=True)
+        tg.send_document(chat_id, "oasis-dance-vse.ics", data_ics,
+                         "📅 Все выступления: нажмите на файл, чтобы добавить их в календарь.")
+        return None
+    if data.startswith("adm_ics_"):
+        send_order_ics(chat_id, int(data[8:]))
+        return None
+    if data == "adm_settings":
+        return settings_screen()
     if data == "adm_export":
         import extras
         extras.export_orders(chat_id)
@@ -260,6 +281,8 @@ def handle_callback(chat_id, message_id, data: str):
         if status == "done":
             import extras
             extras.ask_review(oid)  # клиенту — просьба оценить выступление
+        if status == "work":
+            notify_client_in_work(oid)
         order = storage.get_order(oid)
         is_notification = any(m["admin_id"] == chat_id and m["message_id"] == message_id
                               for m in storage.get_order_msgs(oid))
@@ -392,3 +415,108 @@ def ai_test():
                 f"за {time.time() - started:.1f} с\nОтвет: {html.escape(ans[:100])}")
     except Exception as e:
         return f"🧪 ИИ не ответил ❌\n{html.escape(str(e))[:300]}\nПодробности — в журнале бота."
+
+
+# ---------- календарь ----------
+
+WEEKDAYS = ["пн", "вт", "ср", "чт", "пт", "сб", "вс"]
+
+
+def calendar_screen():
+    import calendar_ics
+    items = calendar_ics.upcoming()
+    lines = ["📅 <b>Календарь выступлений</b>\n"]
+    rows = []
+    if not items:
+        lines.append("Ближайших выступлений нет. Сюда попадают заявки с датой, которые вы взяли в работу.")
+    for day, o in items:
+        d = o["data"]
+        what = d.get("event_type") or "выступление"
+        who = d.get("contact_name") or ""
+        place = d.get("event_location") or ""
+        lines.append(f"<b>{day:%d.%m} ({WEEKDAYS[day.weekday()]})</b> — {html.escape(what)}"
+                     f"{', ' + html.escape(who) if who else ''}{', ' + html.escape(place[:30]) if place else ''}")
+        if len(rows) < 8:
+            rows.append([{"text": f"{day:%d.%m} · №{o['id']} · {what}"[:40], "callback_data": f"adm_open_{o['id']}_work"}])
+    rows.append([{"text": "📲 Подключить календарь телефона", "callback_data": "adm_calsub"}])
+    rows.append([{"text": "📥 Все выступления файлом .ics", "callback_data": "adm_calall"}])
+    return "\n".join(lines), {"inline_keyboard": rows}
+
+
+def calendar_subscribe_screen():
+    import calendar_ics
+    url = calendar_ics.subscribe_url()
+    if not url:
+        return ("⚠️ Не удалось определить адрес сервера. Впишите PUBLIC_URL в настройки бота.",
+                {"inline_keyboard": [[{"text": "⬅️ Календарь", "callback_data": "adm_cal"}]]})
+    last = storage.get_setting("calendar_last_fetch")
+    seen = (f"\n\n✅ Телефон последний раз обновлял календарь: "
+            f"{datetime.fromtimestamp(int(last)).strftime('%d.%m %H:%M')}") if last else ""
+    text = ("📲 <b>Календарь выступлений на телефоне</b>\n\n"
+            "Подпишитесь один раз — новые и изменённые выступления будут появляться сами. "
+            "В календарь попадают заявки с датой в статусе «В работе» и «Выполнена», "
+            "за день до выступления придёт напоминание.\n\n"
+            f"Ссылка (никому не пересылайте):\n<code>{html.escape(url)}</code>\n\n"
+            "<b>iPhone:</b> Настройки → Приложения → Календарь → Учётные записи → Новая учётная запись → "
+            "Другое → «Подписной календарь» → вставьте ссылку → Далее → Сохранить.\n\n"
+            "<b>Android (Google Календарь):</b> на компьютере откройте calendar.google.com → слева «Другие "
+            "календари» → «+» → «Добавить по URL» → вставьте ссылку. Через несколько минут календарь "
+            "появится в приложении на телефоне (включите его в настройках приложения).\n\n"
+            "Google обновляет подписные календари не сразу (до нескольких часов). Чтобы выступление "
+            "появилось мгновенно, нажмите в карточке заявки «📲 В календарь»." + seen)
+    return text, {"inline_keyboard": [
+        [{"text": "🔄 Выдать новую ссылку (старая перестанет работать)", "callback_data": "adm_calreset"}],
+        [{"text": "⬅️ Календарь", "callback_data": "adm_cal"}]]}
+
+
+def send_order_ics(chat_id, oid, for_client=False) -> bool:
+    import calendar_ics
+    order = storage.get_order(oid)
+    if not order or not calendar_ics.parse_date(order["data"].get("event_date")):
+        tg.send_message(chat_id, "У этой заявки нет точной даты — добавить в календарь нельзя.")
+        return False
+    data = calendar_ics.build_ics([order], name="Oasis Dance", with_phone=not for_client)
+    when = order["data"]["event_date"].replace(".", "-")
+    caption = ("📅 Нажмите на файл, чтобы добавить выступление в календарь телефона."
+               if for_client else f"📅 Заявка №{oid}: нажмите на файл — событие добавится в календарь.")
+    r = tg.send_document(chat_id, f"oasis-dance-{when}.ics", data, caption)
+    return bool(r and r.get("ok"))
+
+
+def notify_client_in_work(oid):
+    """Клиенту — что заявку взяли в работу, и кнопка «Добавить в календарь»."""
+    import calendar_ics
+    order = storage.get_order(oid)
+    if not order or order["kind"] != "form" or order["data"].get("work_notified"):
+        return
+    order["data"]["work_notified"] = True
+    storage._q("UPDATE orders SET data=? WHERE id=?", (json.dumps(order["data"], ensure_ascii=False), oid),
+               commit=True)
+    rows = []
+    if calendar_ics.parse_date(order["data"].get("event_date")):
+        rows.append([{"text": "📅 Добавить в мой календарь", "callback_data": f"cal_my_{oid}"}])
+    tg.send_message(order["chat_id"], f"✅ Ваша заявка №{oid} принята в работу. "
+                                      "Менеджер свяжется с вами, чтобы обсудить детали.",
+                    {"inline_keyboard": rows} if rows else None)
+
+
+# ---------- настройки менеджера ----------
+
+def settings_screen():
+    text, _ = status_screen()
+    text += "\n\n<b>Команды менеджера:</b> /admin, /orders, /stats, /export, /post, /sources, /status, /myid"
+    return text, {"inline_keyboard": [
+        [{"text": "🧪 Проверить ИИ", "callback_data": "adm_aitest"},
+         {"text": "📊 Выгрузить в Excel", "callback_data": "adm_export"}],
+        [{"text": "📲 Календарь на телефоне", "callback_data": "adm_calsub"}],
+    ]}
+
+
+def manager_welcome(user):
+    n_new = storage.count_orders(["new"])
+    n_work = storage.count_orders(["work"])
+    name = html.escape(user.get("first_name") or "")
+    return (f"🧑‍💼 <b>Меню менеджера</b>{', ' + name if name else ''}\n\n"
+            f"🆕 Новых заявок: <b>{n_new}</b>\n🔄 В работе: <b>{n_work}</b>\n\n"
+            "Кнопки — внизу экрана. Новые заявки приходят сюда сразу.\n"
+            "Чтобы проверить бота глазами клиента — «👀 Как видит клиент».")

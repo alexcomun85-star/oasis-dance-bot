@@ -132,6 +132,10 @@ def on_message(admin_id, msg) -> bool:
     if not st or st["stage"] not in ("content", "topic"):
         return False
     text = (msg.get("text") or "").strip()
+    import ui
+    if text in ui.ADMIN_BUTTONS or text in (ui.ABTN_TO_CLIENT, ui.BTN_TO_MANAGER):
+        cancel(admin_id)  # нажата кнопка меню — выходим из подготовки поста
+        return False
     if text.lower() in ("/cancel", "отмена"):
         cancel(admin_id)
         tg.send_message(admin_id, "Публикация отменена.")
