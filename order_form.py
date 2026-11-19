@@ -10,19 +10,20 @@ from datetime import date, datetime
 import admin
 import config
 import storage
+import ui
 
 MONTHS = ["Январь", "Февраль", "Март", "Апрель", "Май", "Июнь", "Июль",
           "Август", "Сентябрь", "Октябрь", "Ноябрь", "Декабрь"]
 
 # Шаги: ключ, название в сводке, вопрос
 STEPS = [
-    ("event_type", "Мероприятие", "🎉 <b>Шаг 1 из 6.</b> Какое у вас мероприятие?\nВыберите или напишите своё."),
-    ("event_date", "Дата", "📅 <b>Шаг 2 из 6.</b> Выберите дату мероприятия."),
-    ("event_location", "Место", "📍 <b>Шаг 3 из 6.</b> Где пройдёт мероприятие?\nНапишите город и площадку (можно кратко)."),
-    ("program", "Программа", "💃 <b>Шаг 4 из 6.</b> Какая программа интересует?"),
-    ("contact_phone", "Телефон", "📱 <b>Шаг 5 из 6.</b> Как с вами связаться?\n"
+    ("event_type", "Мероприятие", "🎉 <b>Шаг 1.</b> Какое у вас мероприятие?\nВыберите или напишите своё."),
+    ("event_date", "Дата", "📅 <b>Шаг 2.</b> Выберите дату мероприятия."),
+    ("event_location", "Место", "📍 <b>Шаг 3.</b> Где пройдёт мероприятие?\nНапишите город и площадку (можно кратко)."),
+    ("program", "Программа", "💃 <b>Шаг 4.</b> Какая программа интересует?"),
+    ("contact_phone", "Телефон", "📱 <b>Шаг 5.</b> Как с вами связаться?\n"
                                  "Нажмите кнопку «Отправить номер» внизу экрана или напишите номер."),
-    ("comment", "Пожелания", "✍️ <b>Шаг 6 из 6.</b> Есть пожелания? Напишите их или нажмите «Пропустить»."),
+    ("comment", "Пожелания", "✍️ <b>Шаг 6.</b> Есть пожелания? Напишите их или нажмите «Пропустить»."),
 ]
 KEYS = [s[0] for s in STEPS]
 CONTACT_STEP = KEYS.index("contact_phone")
@@ -40,7 +41,7 @@ BTN_BACK = "⬅️ Назад"
 BTN_CANCEL = "❌ Отменить"
 TG_ONLY_VALUE = "не указан — связаться в Telegram"
 
-REMOVE_KB = {"remove_keyboard": True}
+REMOVE_KB = ui.MAIN_REPLY_KB  # после шага с телефоном возвращаем нижнее меню
 LIMIT_MSG = [("Вы уже отправили несколько заявок — менеджер с вами свяжется. "
               "Если срочно — напишите ему напрямую.", None)]
 MENU_KB = {"inline_keyboard": [[{"text": "🏠 Главное меню", "callback_data": "main_menu"}]]}
@@ -76,7 +77,7 @@ def _options_kb(step):
     return {"inline_keyboard": rows}
 
 
-def calendar_kb(year: int, month: int, step: int):
+def calendar_kb(year: int, month: int, step: int = 0, prefix: str = "of"):
     today = date.today()
     rows = [[{"text": f"{MONTHS[month - 1]} {year}", "callback_data": "of_noop"}],
             [{"text": d, "callback_data": "of_noop"} for d in ("Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс")]]
@@ -88,17 +89,20 @@ def calendar_kb(year: int, month: int, step: int):
             elif date(year, month, d) < today:
                 row.append({"text": "·", "callback_data": "of_noop"})
             else:
-                row.append({"text": str(d), "callback_data": f"of_day_{year}-{month:02d}-{d:02d}"})
+                row.append({"text": str(d), "callback_data": f"{prefix}_day_{year}-{month:02d}-{d:02d}"})
         rows.append(row)
     prev_y, prev_m = (year, month - 1) if month > 1 else (year - 1, 12)
     next_y, next_m = (year, month + 1) if month < 12 else (year + 1, 1)
     nav = []
     if (prev_y, prev_m) >= (today.year, today.month):
-        nav.append({"text": "◀️", "callback_data": f"of_cal_{prev_y}-{prev_m:02d}"})
-    nav.append({"text": "▶️", "callback_data": f"of_cal_{next_y}-{next_m:02d}"})
+        nav.append({"text": "◀️", "callback_data": f"{prefix}_cal_{prev_y}-{prev_m:02d}"})
+    nav.append({"text": "▶️", "callback_data": f"{prefix}_cal_{next_y}-{next_m:02d}"})
     rows.append(nav)
-    rows.append([{"text": "🤷 Дата пока не известна", "callback_data": "of_nodate"}])
-    rows.append(_nav(step))
+    if prefix == "of":
+        rows.append([{"text": "🤷 Дата пока не известна", "callback_data": "of_nodate"}])
+        rows.append(_nav(step))
+    else:
+        rows.append(ui.home_row())
     return {"inline_keyboard": rows}
 
 
@@ -127,6 +131,8 @@ def summary(data: dict) -> str:
     for key, name, _ in STEPS:
         if data.get(key):
             lines.append(f"<b>{name}:</b> {_one_line(data[key])}")
+    if data.get("wish"):
+        lines.append(f"<b>Номер:</b> {_one_line(data['wish'])}")
     if data.get("contact_name"):
         lines.append(f"<b>Имя:</b> {_one_line(data['contact_name'])}")
     return "\n".join(lines)
@@ -150,10 +156,17 @@ def _ask(form, prefix=""):
     return [(text, {"inline_keyboard": [_nav(step)]})]
 
 
+def _skip_preset(form):
+    while form["step"] < len(STEPS) and KEYS[form["step"]] in form["data"].get("_preset", []) \
+            and form["data"].get(KEYS[form["step"]]):
+        form["step"] += 1
+
+
 def _advance(chat_id, form, key, value):
     leaving_contact = form["step"] == CONTACT_STEP
     form["data"][key] = value
     form["step"] += 1
+    _skip_preset(form)
     storage.save_form(chat_id, form)
     msgs = _ask(form, "✅ Принято.\n\n")
     if leaving_contact:
@@ -173,8 +186,14 @@ def form_step(chat_id):
     return f["step"] if f else None
 
 
-def start(chat_id, user: dict, force_new=False):
+def start(chat_id, user: dict, force_new=False, preset: dict = None):
     f = storage.get_form(chat_id)
+    if f and preset and f["step"] < len(STEPS):
+        # Клиент выбрал номер или дату, уже заполняя заявку, — просто добавим это в неё
+        f["data"].update(preset)
+        f["data"]["_preset"] = list(set(f["data"].get("_preset", [])) | set(preset))
+        storage.save_form(chat_id, f)
+        return _ask(f, "👍 Добавил в заявку.\n\n")
     if f and not force_new and 0 < f["step"]:
         return [("У вас есть незаконченная заявка. Продолжим?", {"inline_keyboard": [
             [{"text": "✏️ Продолжить", "callback_data": "of_continue"}],
@@ -184,13 +203,22 @@ def start(chat_id, user: dict, force_new=False):
     form = {"step": 0, "data": {}, "user": {k: user.get(k) for k in ("id", "username", "first_name", "last_name")}}
     if user.get("first_name"):
         form["data"]["contact_name"] = " ".join(x for x in (user.get("first_name"), user.get("last_name")) if x)
+    if preset:
+        form["data"].update(preset)
+        form["data"]["_preset"] = list(preset)  # хранится вместе с заявкой: эти шаги пропускаем
+        _skip_preset(form)
     storage.save_form(chat_id, form)
-    return _ask(form, "🎭 <b>Заявка на выступление</b>\nВсего 6 коротких вопросов — около минуты.\n\n")
+    intro = "🎭 <b>Заявка на выступление</b>\nКороткие вопросы — около минуты.\n"
+    if preset.get("wish") if preset else False:
+        intro += f"Номер: <b>{html.escape(preset['wish'])}</b>\n"
+    if preset.get("event_date") if preset else False:
+        intro += f"Дата: <b>{html.escape(preset['event_date'])}</b>\n"
+    return _ask(form, intro + "\n")
 
 
 def cancel(chat_id):
     storage.delete_form(chat_id)
-    return [("❌ Заявка отменена.", REMOVE_KB), ("Чем ещё помочь?", MENU_KB)]
+    return [("Заявку отменил. Если передумаете — нажмите «🎭 Заказать шоу».", REMOVE_KB)]
 
 
 def _parse_phone(text: str):

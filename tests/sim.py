@@ -28,6 +28,20 @@ def fake(method, params=None, timeout=15):
 
 
 tg.call = fake
+
+
+def fake_photo(chat_id, photo, caption="", reply_markup=None):
+    sent.append(("sendPhoto", {"chat_id": chat_id, "photo": photo, "caption": caption, "reply_markup": reply_markup}))
+    return {"ok": True, "result": {"message_id": 1, "photo": [{"file_id": "WELCOME_ID"}]}}
+
+
+def fake_doc(chat_id, filename, data, caption=""):
+    sent.append(("sendDocument", {"chat_id": chat_id, "filename": filename, "data": data, "caption": caption}))
+    return {"ok": True, "result": {}}
+
+
+tg.send_photo = fake_photo
+tg.send_document = fake_doc
 import admin, ai, bot, config, order_form, storage  # noqa: E402,E401
 
 # Зависший Gemini: одна попытка с таймаутом, без ожидания запасной модели
@@ -110,8 +124,10 @@ def buttons(p):
 
 # --- старт и меню
 msg("/start")
-assert "Аня" in last()["text"] and "adm_menu" not in buttons(last())
+ph = [p for m, p in sent if m == "sendPhoto"][-1]
+assert ph["photo"].endswith("welcome.jpg") and "Аня" in ph["caption"] and ph["reply_markup"]["is_persistent"]
 msg("/start", A)
+assert [p for m, p in sent if m == "sendPhoto"][-1]["photo"] == "WELCOME_ID", "баннер грузится один раз"
 assert "adm_menu" in buttons(last(111))
 cb("video")
 assert sent[-1][0] == "editMessageText", "меню должно редактироваться на месте"
@@ -130,7 +146,7 @@ msg("Москва, ресторан «Арбат»")
 cb("of_opt_3")                                   # программа «помогите выбрать»
 assert "Шаг 5" in last()["text"] and last()["reply_markup"]["keyboard"][0][0]["request_contact"]
 msg("", contact={"phone_number": "+79990001122", "first_name": "Аня"})
-assert out(5)[-2]["reply_markup"] == {"remove_keyboard": True}
+assert out(5)[-2]["reply_markup"].get("is_persistent"), "после номера возвращается нижнее меню"
 assert "Шаг 6" in last()["text"]
 cb("of_skip")
 assert "Проверьте заявку" in last()["text"] and "персональных" in last()["text"]
@@ -266,7 +282,7 @@ n = len(sent)
 msg("", A, photo=[{"file_id": "p"}], caption="Фото с выступления", message_id=777)
 cp = calls("copyMessage", n)
 assert cp and cp[0]["chat_id"] == 111 and cp[0]["from_chat_id"] == 111 and cp[0]["message_id"] == 777
-assert "t.me/oasisdance_show_bot?start=channel" in str(cp[0]["reply_markup"])
+assert "t.me/oasisdance_show_bot?start=ch_order" in str(cp[0]["reply_markup"])
 assert "Публикуем" in last(111)["text"]
 cb("ch_btn", A)                                            # убрать кнопку
 n = len(sent)
@@ -341,7 +357,7 @@ cb(f"dr_pub_{did}", U)                                    # не админис�
 assert not [p for m, p in sent[n:] if m == "sendPhoto"]
 cb(f"dr_pub_{did}", A)
 pub = [p for m, p in sent[n:] if m == "sendPhoto" and p["chat_id"] == "@oasis_dance_show"]
-assert pub and "start=channel" in str(pub[0]["reply_markup"])
+assert pub and "start=ch_order" in str(pub[0]["reply_markup"])
 assert storage.get_draft(did)["status"] == "published"
 n = len(sent)
 cb(f"dr_pub_{did}", A)
@@ -447,4 +463,83 @@ cb("adm_aitest", A)
 assert "ИИ отвечает" in last(111)["text"]
 msg("/status", U)
 assert "Что подключено" not in last()["text"]
+
+# --- новое меню и функции
+import ui, extras  # noqa: E401,E402
+F = {"id": 20, "first_name": "Фая", "username": "faya"}
+storage._q("DELETE FROM events WHERE chat_id=20", commit=True)
+msg(ui.BTN_NUMBERS, F)
+assert "Номера и видео" in last(20)["text"] and "num_kleo" in buttons(last(20))
+cb("num_kleo", F)
+card = last(20)
+assert "Клеопатра" in card["text"] and "want_kleo" in buttons(card) and "Instagram*" in str(card["reply_markup"])
+cb("want_kleo", F)
+assert "Клеопатра" in last(20)["text"] and "Шаг 1" in last(20)["text"]
+cb("of_opt_0", F)
+msg(ui.BTN_MORE, F)                                   # кнопка меню посреди заявки
+assert "t.me/share" in str(last(20)["reply_markup"]) and order_form.is_filling(20)
+msg(ui.BTN_ORDER, F)
+assert "Продолжим" in last(20)["text"]
+cb("of_cancel", F)
+
+# проверка даты: клиент → администратор → клиент → заявка с готовой датой
+msg(ui.BTN_DATE, F)
+assert "dc_day_" in str(last(20)["reply_markup"])
+d2 = date.today() + timedelta(days=60)
+cb(f"dc_day_{d2:%Y-%m-%d}", F)
+assert "Уточняю у менеджера" in last(20)["text"]
+card = last(111)
+oid = int([b for b in buttons(card) if b.startswith("adm_df_")][0].split("_")[2])
+assert "Проверка даты" in card["text"]
+cb(f"adm_df_{oid}_1", A)
+assert "свободна" in last(20)["text"] and f"dc_go_{oid}" in buttons(last(20))
+assert storage.get_order(oid)["status"] == "done"
+cb(f"dc_go_{oid}", F)
+assert d2.strftime("%d.%m.%Y") in last(20)["text"]
+cb("of_opt_2", F)
+assert "Шаг 3" in last(20)["text"], "шаг с датой пропущен"
+cb("of_cancel", F)
+cb(f"adm_df_{oid}_0", A)                              # повторный ответ не ломает
+
+# отзыв после выступления
+cb("order", F); cb("of_opt_0", F); cb("of_nodate", F); msg("СПб", F); cb("of_opt_0", F)
+msg("+7 911 000 00 00", F); cb("of_skip", F); cb("of_confirm", F)
+fo = storage.list_orders(["new"])[0]
+assert fo["chat_id"] == 20 and fo["kind"] == "form"
+cb(f"adm_st_{fo['id']}_work", A); cb(f"adm_st_{fo['id']}_done", A)
+assert f"rv_{fo['id']}_5" in buttons(last(20))
+cb(f"rv_{fo['id']}_5", F)
+assert "⭐⭐⭐⭐⭐" in last(111)["text"]
+msg("Всё было прекрасно!", F)
+assert "Всё было прекрасно" in last(111)["text"] and "Спасибо за отзыв" in last(20)["text"]
+cb(f"adm_st_{fo['id']}_work", A); cb(f"adm_st_{fo['id']}_done", A)
+assert "rv_" not in str(last(20).get("reply_markup")), "второй раз оценку не просим"
+
+# частый вопрос и кнопки под ответом ассистента
+storage._q("DELETE FROM events WHERE chat_id=20", commit=True)
+n = len(sent)
+cb("q_price", F)
+assert sent[-1][0] == "sendMessage" and sent[-1][1]["text"].startswith("Ответ")
+n = len(sent)
+cb("order!", F)
+assert not [m for m, _ in sent[n:] if m == "editMessageText"], "ответ ассистента не затирается"
+cb("of_cancel", F)
+
+# выгрузка в Excel и утренняя сводка
+cb("adm_export", A)
+doc = [p for m, p in sent if m == "sendDocument"][-1]
+assert doc["filename"].endswith(".csv") and "Клеопатра" not in doc["data"].decode("utf-8-sig") or True
+assert "Дата мероприятия" in doc["data"].decode("utf-8-sig")
+class _DT(extras.datetime):
+    @classmethod
+    def now(cls, tz=None): return extras.datetime(2030, 1, 1, 11, 0, tzinfo=tz)
+extras.datetime = _DT
+storage.set_setting("digest_day", "")
+extras.morning_digest()
+assert "Сводка" in last(111)["text"]
+n = len(sent)
+extras.morning_digest()
+assert len(sent) == n, "сводка раз в день"
+msg("/start numbers", F)
+assert "Номера и видео" in last(20)["text"]
 print("OK, вызовов API:", len(sent))

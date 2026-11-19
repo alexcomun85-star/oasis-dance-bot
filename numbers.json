@@ -1,0 +1,14 @@
+{
+  "_comment": "Каталог номеров для раздела «Номера и видео». Описания взяты из подписей к роликам @oasis_dance_show — дополните и поправьте при необходимости.",
+  "numbers": [
+    {"id": "kleo", "title": "👑 Клеопатра", "text": "Номер в образе египетской царицы.", "video": "https://www.instagram.com/reel/Df5Nnr4RmDc/"},
+    {"id": "dragon", "title": "🐉 Танец с драконом", "text": "Китайский танец с драконом — яркий номер для торжественных вечеров.", "video": "https://www.instagram.com/reel/DfhHoeIKPri/"},
+    {"id": "fire", "title": "🔥 Восток и огонь", "text": "Загадочный восток и настоящий огонь.", "video": "https://www.instagram.com/reel/DfZw4nBodER/"},
+    {"id": "folk", "title": "🪆 Народный номер", "text": "Номер в русском народном стиле.", "video": "https://www.instagram.com/reel/DfNWBebRBAV/"},
+    {"id": "butterfly", "title": "🦋 Бабочки", "text": "Экзотичный номер с крыльями — дерзкий, женственный, экспрессивный.", "video": "https://www.instagram.com/reel/DeUUShJomKu/"},
+    {"id": "cowboy", "title": "🤠 Ковбойский танец", "text": "Ковбойский образ: красота, грация и никакой пошлости.", "video": "https://www.instagram.com/reel/DeTZEBso69B/"},
+    {"id": "burlesque", "title": "❤️ Бурлеск", "text": "Бурлеск в красном цвете.", "video": "https://www.instagram.com/reel/DeP6Wf-ISCf/"},
+    {"id": "horses", "title": "🐴 Зеркальные лошадки", "text": "Номер с зеркальными лошадками — символом 2026 года.", "video": "https://www.instagram.com/reel/Deby8gxIj8-/"},
+    {"id": "newyear", "title": "🎄 Новогодний с тростью", "text": "Новогодний танец с тростью в новых образах.", "video": "https://www.instagram.com/reel/DR5SVX5iF47/"}
+  ]
+}

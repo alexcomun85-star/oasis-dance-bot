@@ -24,6 +24,7 @@ KIND = {
     "form": "🎭 Заявка на выступление",
     "callback": "📞 Просьба перезвонить",
     "abandoned": "⏳ Незавершённая заявка",
+    "date": "📅 Проверка даты",
 }
 TABS = {
     "new": (["new"], "🆕 Новые"),
@@ -65,12 +66,25 @@ def card_text(order) -> str:
     lines.append(body or "<i>Данных нет</i>")
     if order["kind"] == "abandoned":
         lines.append("\n<i>Клиент начал заполнять заявку и не закончил. Можно написать ему первым.</i>")
+    if order["kind"] == "date" and order["status"] == "new":
+        lines.append("\n<i>Клиент спрашивает, свободна ли дата. Нажмите «Свободна» или «Занята» — "
+                     "бот сам ответит ему.</i>")
+    if order["data"].get("answer"):
+        lines.append(f"<b>Ответ клиенту:</b> дата {order['data']['answer']}")
     return "\n".join(lines)
 
 
 def card_kb(order, from_list: str = None):
     oid, st = order["id"], order["status"]
     rows = []
+    if order["kind"] == "date" and st == "new":
+        rows.append([{"text": "✅ Свободна", "callback_data": f"adm_df_{oid}_1"},
+                     {"text": "❌ Занята", "callback_data": f"adm_df_{oid}_0"}])
+        rows.append([{"text": "💬 Написать клиенту", "callback_data": f"adm_msg_{oid}"}])
+        if from_list:
+            rows.append([{"text": "⬅️ К списку", "callback_data": f"adm_list_{from_list}_0"},
+                         {"text": "🗂 Кабинет", "callback_data": "adm_menu"}])
+        return {"inline_keyboard": rows}
     if st == "new":
         rows.append([{"text": "🔄 Взять в работу", "callback_data": f"adm_st_{oid}_work"},
                      {"text": "❌ Отклонить", "callback_data": f"adm_st_{oid}_rejected"}])
@@ -128,7 +142,8 @@ def menu_screen():
          {"text": f"🔄 В работе ({n_work})", "callback_data": "adm_list_work_0"}],
         [{"text": "📁 Закрытые", "callback_data": "adm_list_closed_0"},
          {"text": "📊 Статистика", "callback_data": "adm_stats"}],
-        [{"text": "⚙️ Что подключено", "callback_data": "adm_status"}],
+        [{"text": "📊 Выгрузить в Excel", "callback_data": "adm_export"},
+         {"text": "⚙️ Что подключено", "callback_data": "adm_status"}],
         [{"text": "📢 Пост в канал", "callback_data": "ch_menu"},
          {"text": "🔗 Соцсети → канал", "callback_data": "src_menu"}],
     ]}
@@ -142,6 +157,8 @@ def _short(order) -> str:
         parts.append("📞 перезвонить")
     elif order["kind"] == "abandoned":
         parts.append("⏳ не дописал")
+    elif order["kind"] == "date":
+        parts.append("📅 дата?")
     if d.get("event_type"):
         parts.append(d["event_type"])
     if d.get("event_date") and d["event_date"] != "пока не известна":
@@ -211,6 +228,15 @@ def handle_callback(chat_id, message_id, data: str):
         return stats_screen()
     if data == "adm_status":
         return status_screen()
+    if data == "adm_export":
+        import extras
+        extras.export_orders(chat_id)
+        return None
+    if data.startswith("adm_df_"):
+        import extras
+        _, _, oid, free = data.split("_")
+        extras.answer_date(chat_id, int(oid), free == "1")
+        return None
     if data == "adm_aitest":
         tg.send_message(chat_id, "🧪 Проверяю ИИ, это займёт до минуты…")
         tg.send_message(chat_id, ai_test())
@@ -231,6 +257,9 @@ def handle_callback(chat_id, message_id, data: str):
             return None
         storage.set_status(oid, status)
         _refresh_cards(oid, skip=(chat_id, message_id))
+        if status == "done":
+            import extras
+            extras.ask_review(oid)  # клиенту — просьба оценить выступление
         order = storage.get_order(oid)
         is_notification = any(m["admin_id"] == chat_id and m["message_id"] == message_id
                               for m in storage.get_order_msgs(oid))

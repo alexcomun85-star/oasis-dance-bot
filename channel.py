@@ -21,7 +21,7 @@ _lock = threading.Lock()
 CANCEL_ROW = [{"text": "❌ Отмена", "callback_data": "ch_cancel"}]
 
 
-def bot_link(payload="channel"):
+def bot_link(payload="ch_order"):
     return f"https://t.me/{config.BOT_USERNAME}?start={payload}" if config.BOT_USERNAME else config.MANAGER_URL
 
 

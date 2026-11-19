@@ -89,3 +89,34 @@ def answer_callback(callback_id: str, text: str = None):
 
 def typing(chat_id):
     return call("sendChatAction", {"chat_id": chat_id, "action": "typing"})
+
+
+def send_document(chat_id, filename: str, data: bytes, caption: str = ""):
+    """Отправляет файл (например, выгрузку заявок)."""
+    try:
+        r = _session().post(API_URL + "sendDocument", data={"chat_id": chat_id, "caption": caption},
+                            files={"document": (filename, data)}, timeout=60)
+        return r.json()
+    except Exception as e:
+        logger.error("Ошибка отправки файла: %s", e)
+        return None
+
+
+def send_photo(chat_id, photo, caption: str = "", reply_markup: dict = None):
+    """photo — file_id/URL (строка) или путь к файлу на сервере (начинается с /)."""
+    params = {"chat_id": chat_id, "caption": caption, "parse_mode": "HTML"}
+    if reply_markup:
+        params["reply_markup"] = reply_markup
+    if isinstance(photo, str) and not photo.startswith("/"):
+        params["photo"] = photo
+        return call("sendPhoto", params, timeout=60)
+    try:
+        import json as _json
+        if reply_markup:
+            params["reply_markup"] = _json.dumps(reply_markup)
+        with open(photo, "rb") as f:
+            r = _session().post(API_URL + "sendPhoto", data=params, files={"photo": f}, timeout=60)
+        return r.json()
+    except Exception as e:
+        logger.error("Ошибка отправки фото: %s", e)
+        return None

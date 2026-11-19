@@ -22,9 +22,18 @@ KNOWLEDGE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "knowl
 def _knowledge() -> str:
     try:
         with open(KNOWLEDGE_FILE, encoding="utf-8") as f:
-            return "\n".join(l for l in f.read().splitlines() if not l.lstrip().startswith("#") or l.startswith("##"))
+            text = "\n".join(l for l in f.read().splitlines() if not l.lstrip().startswith("#") or l.startswith("##"))
     except FileNotFoundError:
-        return ""
+        text = ""
+    try:
+        import ui
+        items = ui.numbers()
+        if items:
+            text += "\n\n## Каталог номеров в боте (раздел «Номера и видео»)\n" + "\n".join(
+                f"- {n['title']}: {n['text']}" for n in items)
+    except Exception:
+        pass
+    return text
 
 
 def _system_prompt() -> str:
@@ -36,8 +45,9 @@ def _system_prompt() -> str:
         "- Отвечай на русском, кратко: 2–5 предложений, обычным текстом без Markdown и без списков со звёздочками.\n"
         "- Не выдумывай цены, телефоны, даты, имена танцовщиц и другие факты, которых нет в сведениях. "
         "Если сведений нет — честно скажи и предложи оставить заявку или написать менеджеру.\n"
-        "- Если человек хочет заказать выступление или узнать цену на свою дату — предложи нажать "
-        "«Заказать выступление» или «Перезвоните мне» под этим сообщением.\n"
+        "- Если человек хочет заказать выступление — предложи кнопку «Заказать шоу» под этим сообщением; "
+        "если спрашивает про конкретную дату — кнопку «Свободна ли дата?»; номера с видео — в разделе "
+        "«Номера и видео».\n"
         "- Не обсуждай темы, не связанные с шоу-балетом и мероприятиями; мягко возвращай разговор к ним.\n"
         "- Ты ассистент, а не человек; не обещай ничего от имени менеджера."
     )
