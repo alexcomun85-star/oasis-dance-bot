@@ -128,6 +128,7 @@ def menu_screen():
          {"text": f"🔄 В работе ({n_work})", "callback_data": "adm_list_work_0"}],
         [{"text": "📁 Закрытые", "callback_data": "adm_list_closed_0"},
          {"text": "📊 Статистика", "callback_data": "adm_stats"}],
+        [{"text": "📢 Пост в канал", "callback_data": "ch_menu"}],
     ]}
     return text, kb
 
@@ -182,6 +183,7 @@ def stats_screen():
     ab_m = storage.count_orders(None, month, "abandoned")
     done = storage.count_orders(["done"])
     ai_w = storage.count_events("ai", week)
+    from_ch = storage.count_events("src_channel", month)
     conv = f"{o_m / new_m * 100:.0f}%" if new_m else "—"
     text = ("📊 <b>Статистика</b>\n\n"
             f"👥 Пользователей всего: <b>{users}</b>\n"
@@ -190,6 +192,7 @@ def stats_screen():
             f"⏳ Брошенных за 30 дней: {ab_m}\n"
             f"✅ Выполнено всего: {done}\n"
             f"📈 Заявок на нового пользователя (30 дн.): {conv}\n\n"
+            f"📢 Пришли из канала за 30 дней: {from_ch}\n"
             f"🤖 Вопросов ассистенту за 7 дней: {ai_w}")
     return text, {"inline_keyboard": [[{"text": "🗂 Кабинет", "callback_data": "adm_menu"}]]}
 

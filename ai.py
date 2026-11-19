@@ -40,6 +40,24 @@ def _system_prompt() -> str:
     )
 
 
+def _post_prompt() -> str:
+    return (
+        "Ты — копирайтер Telegram-канала шоу-балета Oasis Dance. Пишешь живые, тёплые посты для подписчиков "
+        "и потенциальных заказчиков.\n\nСведения о коллективе (используй только их):\n" + _knowledge() + "\n\n"
+        "Правила:\n"
+        "- Русский язык, 400–900 знаков, короткие абзацы, 2–5 уместных эмодзи.\n"
+        "- Обычный текст без Markdown, без хэштегов-простыней (не больше 3 хэштегов).\n"
+        "- Не выдумывай цены, даты, места выступлений, имена и факты, которых нет в сведениях или в задании.\n"
+        "- Заканчивай мягким призывом: оставить заявку через кнопку «Заказать выступление» под постом.\n"
+        "- Выдай только текст поста, без пояснений."
+    )
+
+
+def generate_post(topic: str) -> str:
+    return _call(_post_prompt(), [{"role": "user", "parts": [{"text": "Тема поста: " + topic}]}],
+                 temperature=0.8, max_tokens=3000)
+
+
 def is_available() -> bool:
     return bool(config.GEMINI_API_KEY)
 
@@ -51,11 +69,15 @@ def generate(message: str, history: list = None) -> str:
         role = "model" if m.get("role") == "assistant" else "user"
         contents.append({"role": role, "parts": [{"text": m.get("content", "")}]})
     contents.append({"role": "user", "parts": [{"text": message[:2000]}]})
+    return _call(_system_prompt(), contents, temperature=0.5, max_tokens=2048)
 
+
+# Запас токенов большой: новые модели Gemini тратят часть лимита на «размышления», длину задаёт промпт.
+def _call(system: str, contents: list, temperature: float, max_tokens: int) -> str:
     body = {
-        "systemInstruction": {"parts": [{"text": _system_prompt()}]},
+        "systemInstruction": {"parts": [{"text": system}]},
         "contents": contents,
-        "generationConfig": {"temperature": 0.5, "maxOutputTokens": 600},
+        "generationConfig": {"temperature": temperature, "maxOutputTokens": max_tokens},
     }
 
     models = [config.GEMINI_MODEL] + [m for m in FALLBACK_MODELS if m != config.GEMINI_MODEL]

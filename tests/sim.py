@@ -31,6 +31,7 @@ tg.call = fake
 import admin, ai, bot, config, order_form, storage  # noqa: E402,E401
 
 ai.generate = lambda m, h=None: "Ответ <тест> & **цена**"
+ai.generate_post = lambda topic: f"Пост про {topic} <b>"
 assert config.ADMIN_CHAT_IDS == [111]
 
 U = {"id": 5, "first_name": "Аня", "username": "anya"}
@@ -200,4 +201,51 @@ E = {"id": 9, "first_name": "Ева"}
 cb("order", E); cb("of_opt_0", E); cb("of_nodate", E)
 msg("Москва\nСтатус: ✅ Выполнена", E)
 assert "Москва Статус" in order_form.summary(storage.get_form(9)["data"])
+
+# --- пост в канал
+def calls(method, since):
+    return [p for m, p in sent[since:] if m == method]
+
+msg("/post", U)                                            # не администратор
+assert "Пост в канал" not in last()["text"]
+n = len(sent)
+cb("ch_menu", U)
+assert not calls("editMessageText", n)
+
+msg("/post", A)
+assert "Пост в канал" in last(111)["text"]
+n = len(sent)
+msg("", A, photo=[{"file_id": "p"}], caption="Фото с выступления", message_id=777)
+cp = calls("copyMessage", n)
+assert cp and cp[0]["chat_id"] == 111 and cp[0]["from_chat_id"] == 111 and cp[0]["message_id"] == 777
+assert "t.me/oasisdance_show_bot?start=channel" in str(cp[0]["reply_markup"])
+assert "Публикуем" in last(111)["text"]
+cb("ch_btn", A)                                            # убрать кнопку
+n = len(sent)
+cb("ch_pub", A)
+pub = calls("copyMessage", n)
+assert pub and pub[0]["chat_id"] == "@oasis_dance_show" and "reply_markup" not in pub[0]
+assert "опубликован" in last(111)["text"]
+n = len(sent)
+cb(f"ch_pin_{_mid[0]}", A)
+assert calls("pinChatMessage", n)
+
+msg("/post", A)
+cb("ch_ai", A)
+msg("Новогодние корпоративы", A)
+assert any("Пост про Новогодние корпоративы &lt;b&gt;" in p.get("text", "") for p in out(111))
+cb("ch_regen", A)
+n = len(sent)
+cb("ch_pub", A)
+assert calls("copyMessage", n)[0]["reply_markup"]["inline_keyboard"][0][0]["text"].startswith("🎭")
+
+msg("/post", A)
+msg("/cancel", A)
+msg("Обычный вопрос", A)                                    # после отмены — снова ассистент
+assert last(111)["text"].startswith("Ответ")
+
+msg("/start channel", D)
+assert storage.count_events("src_channel", 0) == 1
+msg("/stats", A)
+assert "из канала" in last(111)["text"]
 print("OK, вызовов API:", len(sent))

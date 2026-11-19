@@ -42,6 +42,7 @@ for _h in logging.getLogger().handlers:
     _h.addFilter(_RedactSecrets())
 
 import admin  # noqa: E402
+import channel  # noqa: E402
 import ai  # noqa: E402
 import order_form  # noqa: E402
 import storage  # noqa: E402
@@ -116,7 +117,8 @@ def help_screen(chat_id):
     if ai.is_available():
         text += "\nЛюбой вопрос можно просто написать сообщением — ответит ассистент."
     if admin.is_admin(chat_id):
-        text += "\n\n<b>Для администратора:</b>\n/admin — кабинет заявок\n/orders — новые заявки\n/stats — статистика"
+        text += ("\n\n<b>Для администратора:</b>\n/admin — кабинет заявок\n/orders — новые заявки\n"
+                 "/stats — статистика\n/post — пост в канал")
     return [(text, back_kb())]
 
 
@@ -252,8 +254,10 @@ def cancel_all(chat_id):
 def on_command(chat_id, user, cmd):
     if cmd == "/start":
         admin.cancel_reply(chat_id)
+        channel.cancel(chat_id)
         return start_screen(chat_id, user)
     if cmd == "/cancel":
+        channel.cancel(chat_id)
         return cancel_all(chat_id)
     if cmd == "/help":
         return help_screen(chat_id)
@@ -285,6 +289,8 @@ def on_command(chat_id, user, cmd):
             return [admin.list_screen("new", 0)]
         if cmd == "/stats":
             return [admin.stats_screen()]
+        if cmd == "/post":
+            return [channel.start(chat_id)]
     return help_screen(chat_id)
 
 
@@ -300,6 +306,10 @@ def on_message(msg):
     chat_id = chat["id"]
     user = msg.get("from", {})
     storage.touch_user(user)
+
+    # Администратор готовит пост в канал (принимаем и фото, и видео)
+    if admin.is_admin(chat_id) and channel.active(chat_id) and channel.on_message(chat_id, msg):
+        return
 
     # Номер, отправленный кнопкой
     if msg.get("contact"):
@@ -322,6 +332,8 @@ def on_message(msg):
 
     if text.startswith("/"):
         cmd = text.split()[0].split("@")[0].lower()
+        if cmd == "/start" and len(text.split()) > 1:
+            storage.log_event(chat_id, "src_" + text.split()[1][:20])
         render(chat_id, on_command(chat_id, user, cmd))
         return
 
@@ -406,6 +418,16 @@ def on_callback(cq):
             tg.edit_message(chat_id, message_id, *res)
         return
 
+    if data.startswith("ch_"):
+        if not admin.is_admin(chat_id):
+            tg.answer_callback(cq["id"], "Недоступно")
+            return
+        tg.answer_callback(cq["id"])
+        res = channel.handle_callback(chat_id, data)
+        if res:
+            tg.edit_message(chat_id, message_id, *res)
+        return
+
     if data.startswith("cli_rep_"):
         tg.answer_callback(cq["id"])
         try:
@@ -435,7 +457,8 @@ USER_COMMANDS = [
     ("video", "Видео и фото"), ("contact", "Контакты"), ("privacy", "Персональные данные"),
     ("help", "Помощь"),
 ]
-ADMIN_COMMANDS = USER_COMMANDS + [("admin", "Кабинет заявок"), ("orders", "Новые заявки"), ("stats", "Статистика")]
+ADMIN_COMMANDS = USER_COMMANDS + [("admin", "Кабинет заявок"), ("orders", "Новые заявки"),
+                                  ("stats", "Статистика"), ("post", "Пост в канал")]
 DESCRIPTION = ("Шоу-балет Oasis Dance — шоу-балет премиум-класса для свадеб, корпоративов и праздников.\n\n"
                "Здесь можно оставить заявку на выступление за минуту, попросить перезвонить "
                "или задать вопрос ассистенту.")
@@ -500,6 +523,7 @@ def run():
     imported = storage.migrate_jsonl(os.path.join(config.DATA_DIR, "orders.jsonl"))
     if imported:
         logger.info("Перенесено заявок из прошлой версии: %s", imported)
+    config.BOT_USERNAME = me["result"]["username"]
     logger.info("Бот @%s запущен. ИИ-ассистент: %s. Администраторы: %s",
                 me["result"]["username"], "включён" if ai.is_available() else "выключен",
                 config.ADMIN_CHAT_IDS or "не заданы")

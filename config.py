@@ -45,6 +45,9 @@ WORK_HOURS = os.environ.get("WORK_HOURS", "ежедневно с 10:00 до 20:0
 INSTAGRAM_URL = os.environ.get("INSTAGRAM_URL", "https://www.instagram.com/ebru.dance")
 VK_URL = os.environ.get("VK_URL", "https://vk.com/oasis_dance_show")
 CHANNEL_URL = os.environ.get("CHANNEL_URL", "https://t.me/oasis_dance_show")
+# Канал, куда бот публикует посты (бот должен быть его администратором)
+CHANNEL_ID = os.environ.get("CHANNEL_ID", "@oasis_dance_show")
+BOT_USERNAME = os.environ.get("BOT_USERNAME", "oasisdance_show_bot")  # уточняется при запуске
 
 MANAGER_URL = f"https://t.me/{MANAGER_USERNAME}"
 
