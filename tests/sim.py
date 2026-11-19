@@ -59,6 +59,7 @@ ai.requests.get = lambda *a, **k: _R(200, {"models": [
     {"name": "models/gemini-3.6-flash", "supportedGenerationMethods": ["generateContent"]},
     {"name": "models/gemini-3.1-flash-lite", "supportedGenerationMethods": ["generateContent"]},
     {"name": "models/gemini-3.1-flash-image", "supportedGenerationMethods": ["generateContent"]}]})
+assert ai._candidates(fast=True)[0] == "gemini-3.1-flash-lite", "для чата — быстрые модели первыми"
 cands = ai._candidates()
 assert cands[0] == "gemini-3.6-flash" and cands.index("gemini-flash-latest") < cands.index("gemini-3.1-flash-lite") \
     and "gemini-3.1-flash-image" not in cands, cands
@@ -87,7 +88,7 @@ try:
     ai.generate("тест")
 except RuntimeError:
     pass
-assert _tries and _tries[0] == (5, 30), _tries
+assert _tries and _tries[0] == (5, 20), _tries
 ai.requests.post = _orig_post
 assert tg.answer_callback("x1") is not None and tg.answer_callback("x1") is None, "кнопка отвечается один раз"
 

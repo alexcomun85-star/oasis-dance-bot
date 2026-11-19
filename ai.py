@@ -83,7 +83,7 @@ def rewrite_post(original: str, source_name: str) -> str:
         "- Выдай только текст поста."
     )
     return _call(system, [{"role": "user", "parts": [{"text": original[:6000]}]}], temperature=0.6, max_tokens=3000,
-                 read_timeout=90, total_limit=150)
+                 read_timeout=90, total_limit=150, fast=False)
 
 
 def is_relevant(text: str) -> bool:
@@ -102,7 +102,7 @@ def is_relevant(text: str) -> bool:
 
 def generate_post(topic: str) -> str:
     return _call(_post_prompt(), [{"role": "user", "parts": [{"text": "Тема поста: " + topic}]}],
-                 temperature=0.8, max_tokens=3000, read_timeout=90, total_limit=150)
+                 temperature=0.8, max_tokens=3000, read_timeout=90, total_limit=150, fast=False)
 
 
 def is_available() -> bool:
@@ -149,8 +149,10 @@ def _available_models():
     return names
 
 
-def _candidates():
+def _candidates(fast=False):
     found = _available_models()
+    if fast:  # для ответов клиентам важнее скорость: облегчённые модели отвечают в разы быстрее
+        found = [m for m in found if "lite" in m] + [m for m in found if "lite" not in m]
     preferred = [] if config.GEMINI_MODEL in ("", "auto") else [config.GEMINI_MODEL]
     order = preferred + found + FALLBACK_MODELS
     seen, result = set(), []
@@ -163,14 +165,14 @@ def _candidates():
 
 # Запас токенов большой: новые модели Gemini тратят часть лимита на «размышления», длину задаёт промпт.
 def _call(system: str, contents: list, temperature: float, max_tokens: int,
-          read_timeout: int = 30, total_limit: int = 40) -> str:
+          read_timeout: int = 20, total_limit: int = 35, fast: bool = True) -> str:
     body = {
         "systemInstruction": {"parts": [{"text": system}]},
         "contents": contents,
         "generationConfig": {"temperature": temperature, "maxOutputTokens": max_tokens},
     }
     started = time.time()
-    models = _candidates() if config.GEMINI_API_KEY else []
+    models = _candidates(fast) if config.GEMINI_API_KEY else []
     # После круга по всем моделям — ещё одна попытка с первыми двумя через паузу
     attempts = models + (["_pause"] + models[:2] if len(models) > 1 else [])
     for model in attempts:
@@ -182,8 +184,11 @@ def _call(system: str, contents: list, temperature: float, max_tokens: int,
         if time.time() - started > total_limit:
             break  # не держим человека дольше заданного времени в сумме
         try:
+            left = total_limit - (time.time() - started)
+            if left < 5:
+                break
             r = requests.post(API.format(model=model), params={"key": config.GEMINI_API_KEY},
-                              json=body, timeout=(5, read_timeout))
+                              json=body, timeout=(5, min(read_timeout, left)))
             if r.status_code != 200:
                 # 503 — модель перегружена, 429 — лимит, 404 — модели нет: пробуем следующую
                 logger.warning("Gemini %s: %s %s", model, r.status_code, r.text[:200].replace("\n", " "))
@@ -195,12 +200,12 @@ def _call(system: str, contents: list, temperature: float, max_tokens: int,
                 last_used.update(model=f"Gemini {model}", time=time.time(), seconds=time.time() - started)
                 return text.replace("**", "")
         except requests.Timeout:
-            logger.error("Gemini %s не ответил за %s секунд", model, read_timeout)
+            logger.error("Gemini %s не ответил вовремя", model)
             continue  # пробуем следующую модель, если общий предел ещё не исчерпан
         except Exception as e:
             logger.error("Ошибка Gemini %s: %s", model, e)
     if config.AI_FALLBACK_KEY:
-        left = max(10, total_limit - (time.time() - started))
+        left = max(8, total_limit - (time.time() - started))
         try:
             return _call_fallback(system, contents, timeout=min(read_timeout, left))
         except Exception as e:

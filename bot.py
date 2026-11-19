@@ -277,9 +277,13 @@ def ai_answer(chat_id, text):
     stop = threading.Event()
 
     def keep_typing():
+        waited = 0
         while not stop.is_set():
             tg.typing(chat_id)
             stop.wait(4)
+            waited += 4
+            if waited == 12 and not stop.is_set():
+                tg.send_message(chat_id, "⏳ Секунду, готовлю ответ…")
     threading.Thread(target=keep_typing, daemon=True).start()
     try:
         answer = ai.generate(text, history)
