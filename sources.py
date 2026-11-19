@@ -3,10 +3,13 @@
 → ИИ переписывает для Telegram (с сохранением ссылок) → черновик администратору или сразу в канал.
 """
 import html
+import json
 import logging
 import re
 import threading
 import time
+import xml.etree.ElementTree as ET
+from urllib.parse import urlparse
 
 import requests
 
@@ -98,8 +101,12 @@ def _compose(original: str, source_name: str, link: str, extra_links=()) -> str:
     text = html.escape(body) if body else "💃 Свежая публикация шоу-балета Oasis Dance."
     if lost:
         text += "\n\n" + "\n".join(html.escape(u) for u in lost)
+    is_insta = source_name == "Instagram" and config.INSTAGRAM_NOTE
     if link:
-        text += f'\n\n📎 <a href="{html.escape(link)}">Оригинал: {html.escape(source_name)}</a>'
+        label = html.escape(source_name) + ("*" if is_insta else "")
+        text += f'\n\n📎 <a href="{html.escape(link)}">Оригинал: {label}</a>'
+    if is_insta:
+        text += f"\n<i>* {html.escape(config.INSTAGRAM_NOTE)}</i>"
     return text
 
 
@@ -111,8 +118,12 @@ def _send(chat_id, draft, reply_markup):
         return tg.call(method, {"chat_id": chat_id, mtype: media, "caption": text,
                                 "parse_mode": "HTML", "reply_markup": reply_markup}, timeout=60)
     # Длинный текст или нет медиа — обычное сообщение; превью ссылки покажет картинку оригинала
-    return tg.call("sendMessage", {"chat_id": chat_id, "text": text, "parse_mode": "HTML",
-                                   "reply_markup": reply_markup, "disable_web_page_preview": not draft["link"]})
+    params = {"chat_id": chat_id, "text": text, "parse_mode": "HTML", "reply_markup": reply_markup}
+    if draft["link"]:
+        params["link_preview_options"] = {"url": draft["link"], "prefer_large_media": True}
+    else:
+        params["link_preview_options"] = {"is_disabled": True}
+    return tg.call("sendMessage", params)
 
 
 def _draft_kb(did):
@@ -170,9 +181,7 @@ def _post_url(msg_id):
 
 # ---------- проверка источников ----------
 
-def check_vk(src, backfill=0):
-    key = "vk:" + src
-    posts = vk_posts(src, count=max(10, backfill))
+def _process(key, source_name, title, posts, backfill, bf_callback):
     first_time = not storage.source_known(key)
     fresh = [p for p in posts if not storage.is_seen(key, p["id"])]
     if first_time and not backfill:
@@ -180,41 +189,118 @@ def check_vk(src, backfill=0):
         for p in posts:
             storage.mark_seen(key, p["id"])
         storage.mark_seen(key, "_connected")
-        idx = config.VK_SOURCES.index(src) if src in config.VK_SOURCES else 0
         for admin_id in config.ADMIN_CHAT_IDS:
-            tg.send_message(admin_id, f"🔗 Подключена страница ВКонтакте <b>{html.escape(src)}</b>: найдено публикаций — "
+            tg.send_message(admin_id, f"🔗 Подключён источник <b>{html.escape(title)}</b>: найдено публикаций — "
                                       f"{len(posts)}. Новые буду готовить для канала автоматически.",
-                            {"inline_keyboard": [[{"text": "📥 Подготовить 3 последние",
-                                                   "callback_data": f"src_bf_{idx}"}]]})
+                            {"inline_keyboard": [[{"text": "📥 Подготовить 3 последние", "callback_data": bf_callback}]]})
         return 0
     if backfill:
-        fresh = [p for p in posts if not p["pinned"]][-backfill:]
+        fresh = [p for p in posts if not p.get("pinned")][-backfill:]
     n = 0
     for p in fresh:
         storage.mark_seen(key, p["id"])
-        if (not p["text"].strip() and not p["photo"]) or storage.has_draft(key, p["id"]):
+        if (not p["text"].strip() and not p.get("photo")) or storage.has_draft(key, p["id"]):
             continue
-        new_draft(key, p["id"], "ВКонтакте", p["text"], p["link"],
-                  "photo" if p["photo"] else None, p["photo"], p["extra_links"],
-                  auto=config.AUTO_PUBLISH and not backfill)
+        if ai.is_available() and not ai.is_relevant(p["text"]):
+            logger.info("Пропущена личная публикация %s %s", key, p["id"])
+            continue
+        new_draft(key, p["id"], source_name, p["text"], p["link"],
+                  "photo" if p.get("photo") else None, p.get("photo"), p.get("extra_links", ()),
+                  auto=config.AUTO_PUBLISH and not backfill and source_name != "Instagram")
         n += 1
     return n
 
 
+def check_vk(src, backfill=0):
+    idx = config.VK_SOURCES.index(src) if src in config.VK_SOURCES else 0
+    return _process("vk:" + src, "ВКонтакте", f"ВКонтакте: {src}", vk_posts(src, count=max(10, backfill)),
+                    backfill, f"src_bf_{idx}")
+
+
+# ---------- ленты RSS/Atom/JSON (без ключей) ----------
+
+def _strip_html(s: str):
+    img = re.search(r'<img[^>]+src="([^"]+)"', s or "")
+    text = re.sub(r"<br\s*/?>|</p>", "\n", s or "", flags=re.I)
+    text = html.unescape(re.sub(r"<[^>]+>", "", text))
+    return re.sub(r"\n{3,}", "\n\n", text).strip(), (img.group(1) if img else None)
+
+
+def _name_for(url: str, fallback: str) -> str:
+    host = urlparse(url or "").netloc
+    if "instagram" in (url or "").lower():
+        return "Instagram"
+    if "vk.com" in host or "vk.ru" in host:
+        return "ВКонтакте"
+    if "t.me" in host:
+        return "Telegram"
+    return fallback or host or "источник"
+
+
+def feed_posts(url: str):
+    r = requests.get(url, timeout=20, headers={"User-Agent": "OasisDanceBot/1.0"})
+    r.raise_for_status()
+    body = r.text.strip()
+    if body.startswith("{"):
+        data = json.loads(body)
+        name = data.get("source", "")
+        items = [{"id": str(it["id"]), "date": it.get("date", 0), "text": it.get("text", ""),
+                  "link": it.get("link", ""), "photo": it.get("photo")} for it in data.get("items", [])]
+        items.sort(key=lambda p: p["date"])
+        return name or _name_for(items[0]["link"] if items else "", ""), items
+    root = ET.fromstring(r.content)
+    ns = {"a": "http://www.w3.org/2005/Atom", "media": "http://search.yahoo.com/mrss/"}
+    feed_title = root.findtext("channel/title") or root.findtext("a:title", namespaces=ns) or ""
+    posts = []
+    for it in root.findall("channel/item"):
+        text, img = _strip_html(it.findtext("description") or it.findtext("title") or "")
+        enc = it.find("enclosure")
+        media = it.find("media:content", ns)
+        if media is None:
+            media = it.find("media:thumbnail", ns)
+        photo = None
+        if enc is not None and "image" in (enc.get("type") or "image"):
+            photo = enc.get("url")
+        if not photo and media is not None:
+            photo = media.get("url")
+        photo = photo or img
+        link = it.findtext("link") or ""
+        posts.append({"id": it.findtext("guid") or link, "text": text, "link": link, "photo": photo})
+    for e in root.findall("a:entry", ns):
+        link_el = e.find("a:link", ns)
+        link = link_el.get("href") if link_el is not None else ""
+        text, img = _strip_html(e.findtext("a:content", namespaces=ns) or e.findtext("a:summary", namespaces=ns)
+                                or e.findtext("a:title", namespaces=ns) or "")
+        posts.append({"id": e.findtext("a:id", namespaces=ns) or link, "text": text, "link": link, "photo": img})
+    posts.reverse()  # в лентах новые сверху — обрабатываем от старых к новым
+    return _name_for(posts[-1]["link"] if posts else "", feed_title), posts
+
+
+def check_feed(url, backfill=0):
+    idx = config.FEED_SOURCES.index(url) if url in config.FEED_SOURCES else 0
+    name, posts = feed_posts(url)
+    return _process("feed:" + url, name, f"{name} (лента)", posts, backfill, f"src_bff_{idx}")
+
+
 def check_all():
-    if not config.VK_SERVICE_TOKEN:
-        last_check.update(time=time.time(), result="нет ключа ВКонтакте (VK_SERVICE_TOKEN)")
-        return
     if not _check_lock.acquire(blocking=False):
         return
     try:
         total, errors = 0, []
-        for src in config.VK_SOURCES:
+        for src in (config.VK_SOURCES if config.VK_SERVICE_TOKEN else []):
             try:
                 total += check_vk(src)
             except Exception as e:
                 errors.append(f"{src}: {e}")
                 logger.error("Ошибка проверки ВК %s: %s", src, e)
+        for url in config.FEED_SOURCES:
+            try:
+                total += check_feed(url)
+            except Exception as e:
+                errors.append(f"лента {urlparse(url).netloc}: {e}")
+                logger.error("Ошибка проверки ленты %s: %s", url, e)
+        if not config.VK_SERVICE_TOKEN:
+            errors.append("ВКонтакте не проверяется — нет ключа VK_SERVICE_TOKEN")
         last_check.update(time=time.time(),
                           result=f"новых публикаций: {total}" + (f"; ошибки: {'; '.join(errors)}" if errors else ""))
     finally:
@@ -256,6 +342,13 @@ def handle_callback(admin_id, message_id, data):
             return "Источник не найден"
         n = check_vk(src, backfill=3)
         return f"Готовлю черновики: {n}"
+    if data.startswith("src_bff_"):
+        try:
+            url = config.FEED_SOURCES[int(data[8:])]
+        except (ValueError, IndexError):
+            return "Источник не найден"
+        n = check_feed(url, backfill=3)
+        return f"Готовлю черновики: {n}"
     if data == "src_menu":
         tg.edit_message(admin_id, message_id, *status_screen())
         return None
@@ -292,7 +385,8 @@ def handle_callback(admin_id, message_id, data):
         return "Пропущено"
     if action == "regen":
         tg.typing(admin_id)
-        name = "ВКонтакте" if d["source"].startswith("vk:") else "Telegram"
+        name = ("ВКонтакте" if d["source"].startswith("vk:") else
+                _name_for(d["link"], "Telegram") if d["source"].startswith("feed:") else "Telegram")
         storage.update_draft(did, text=_compose(d["original"], name, d["link"]))
         tg.call("editMessageReplyMarkup", {"chat_id": admin_id, "message_id": message_id,
                                            "reply_markup": done_kb("🔁 Заменён новым вариантом")})
@@ -319,10 +413,14 @@ def status_screen():
             f"Проверка каждые {config.SOURCE_CHECK_MINUTES} мин., последняя: {when} — {html.escape(last_check['result'])}\n"
             f"Режим: {'публиковать сразу' if config.AUTO_PUBLISH else 'черновик на одобрение'}\n"
             f"Черновиков ждут решения: {storage.count_drafts('pending')}\n\n"
-            "Telegram: перешлите боту любой пост — он подготовит его для канала.\n"
-            "Instagram: пока не подключён.")
+            f"Ленты (Instagram и др.): {len(config.FEED_SOURCES)}\n"
+            "Личные публикации ИИ отсеивает; посты из Instagram всегда идут на одобрение.\n\n"
+            "Telegram: перешлите боту любой пост — он подготовит его для канала.")
     rows = [[{"text": "🔄 Проверить сейчас", "callback_data": "src_check"}]]
     for i, src in enumerate(config.VK_SOURCES[:5]):
         rows.append([{"text": f"📥 3 последние из {src}"[:40], "callback_data": f"src_bf_{i}"}])
+    for i, url in enumerate(config.FEED_SOURCES[:5]):
+        rows.append([{"text": f"📥 3 последние из ленты {_name_for(url, urlparse(url).netloc)}"[:40],
+                      "callback_data": f"src_bff_{i}"}])
     rows.append([{"text": "🗂 Кабинет", "callback_data": "adm_menu"}])
     return text, {"inline_keyboard": rows}

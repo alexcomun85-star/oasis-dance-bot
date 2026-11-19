@@ -252,6 +252,9 @@ assert "из канала" in last(111)["text"]
 
 # --- соцсети → канал
 import sources  # noqa: E402
+FEEDS_DEFAULT = list(config.FEED_SOURCES)
+config.FEED_SOURCES = []
+ai.is_relevant = lambda text: "Мишут" not in text
 config.VK_SERVICE_TOKEN = ""
 sources.check_all()
 assert "нет ключа" in sources.last_check["result"]
@@ -274,7 +277,7 @@ VK["items"] = [post(1, "старый пост"), post(2, "ещё старый")]
 n = len(sent)
 sources.check_all()
 note = [p for m, p in sent[n:] if m == "sendMessage" and p["chat_id"] == 111][-1]
-assert "Подключена страница" in note["text"] and "src_bf_0" in buttons(note)
+assert "Подключён источник" in note["text"] and "src_bf_0" in buttons(note)
 assert not [p for m, p in sent[n:] if m in ("sendPhoto",)], "старые посты не переносим"
 
 VK["items"].append(post(3, "Выступление в субботу! Билеты https://example.com/tickets"))
@@ -335,4 +338,41 @@ logging.getLogger().addHandler(h2); logging.getLogger("t").error("token=VKSECRET
 assert "VKSECRET" not in buf2.getvalue()
 msg("/sources", A)
 assert "Источники постов" in last(111)["text"]
+
+# --- ленты без ключей: JSON из репозитория (Instagram) и RSS
+assert FEEDS_DEFAULT and FEEDS_DEFAULT[0].endswith("feeds/instagram.json")
+import json as _json
+FEED = {}
+class _Resp:
+    def __init__(self, body): self.text = body; self.content = body.encode()
+    def raise_for_status(self): pass
+sources.requests.get = lambda url, **kw: _Resp(FEED[url])
+here = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
+insta = _json.load(open(os.path.join(here, "feeds", "instagram.json"), encoding="utf-8"))
+FEED["J"] = _json.dumps(insta, ensure_ascii=False)
+config.FEED_SOURCES = ["J"]
+config.AUTO_PUBLISH = True                              # Instagram всё равно идёт на одобрение
+n = len(sent)
+sources.check_all()
+assert any("Подключён источник" in p.get("text", "") and "Instagram" in p["text"] for m, p in sent[n:])
+insta["items"].append({"id": "NEW1", "date": 2e9, "text": "🦋 Новый номер Бабочки\n✅ Для брони звоните 8 925 257 04 05",
+                       "link": "https://www.instagram.com/reel/NEW1/"})
+insta["items"].append({"id": "NEW2", "date": 2e9 + 1, "text": "Мишутке полгода", "link": "https://www.instagram.com/reel/NEW2/"})
+FEED["J"] = _json.dumps(insta, ensure_ascii=False)
+n = len(sent)
+sources.check_all()
+dr = [p for m, p in sent[n:] if m == "sendMessage" and "Новый номер Бабочки" in p.get("text", "")]
+assert dr and "Instagram*" in dr[0]["text"] and "экстремистской" in dr[0]["text"]
+assert dr[0]["link_preview_options"]["url"] == "https://www.instagram.com/reel/NEW1/"
+assert not any(p.get("chat_id") == "@oasis_dance_show" for m, p in sent[n:]), "Instagram не публикуем без одобрения"
+assert not any("Мишутке" in p.get("text", "") for m, p in sent[n:]), "личное отсеяно"
+config.AUTO_PUBLISH = False
+
+FEED["R"] = """<?xml version="1.0"?><rss xmlns:media="http://search.yahoo.com/mrss/"><channel><title>VK RSS</title>
+<item><guid>v2</guid><link>https://vk.com/wall-1_2</link><description>&lt;p&gt;Второй &lt;img src="https://img/2.jpg"&gt;&lt;/p&gt;</description></item>
+<item><guid>v1</guid><link>https://vk.com/wall-1_1</link><description>Первый</description><media:content url="https://img/1.jpg"/></item>
+</channel></rss>"""
+name, items = sources.feed_posts("R")
+assert name == "ВКонтакте" and [i["id"] for i in items] == ["v1", "v2"]
+assert items[0]["photo"] == "https://img/1.jpg" and items[1]["photo"] == "https://img/2.jpg" and items[1]["text"] == "Второй"
 print("OK, вызовов API:", len(sent))

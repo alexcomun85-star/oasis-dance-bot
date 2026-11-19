@@ -66,6 +66,12 @@ OPERATOR_NAME = os.environ.get("OPERATOR_NAME", "шоу-балет Oasis Dance")
 VK_SERVICE_TOKEN = os.environ.get("VK_SERVICE_TOKEN", "")
 # Страницы ВК через запятую: короткое имя (oasis_dance_show), id человека (id123) или группы (-123)
 VK_SOURCES = [x.strip() for x in os.environ.get("VK_SOURCES", "oasis_dance_show").split(",") if x.strip()]
+# Ленты публикаций без ключей: RSS/Atom (rss.app, vkrss.com и т.п.) или JSON (feeds/instagram.json в репозитории)
+FEED_SOURCES = [x.strip() for x in os.environ.get(
+    "FEED_SOURCES",
+    "https://raw.githubusercontent.com/alexcomun85-star/oasis-dance-bot/main/feeds/instagram.json").split(",") if x.strip()]
+# Пометка к постам из Instagram (пусто — без пометки)
+INSTAGRAM_NOTE = os.environ.get("INSTAGRAM_NOTE", "Instagram принадлежит компании Meta, признанной экстремистской и запрещённой в РФ.")
 SOURCE_CHECK_MINUTES = int(os.environ.get("SOURCE_CHECK_MINUTES", "20"))
 # 1 — публиковать в канал сразу, 0 — сначала присылать черновик администратору на одобрение
 AUTO_PUBLISH = os.environ.get("AUTO_PUBLISH", "0") == "1"
