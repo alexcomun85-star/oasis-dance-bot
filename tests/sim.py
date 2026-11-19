@@ -37,6 +37,24 @@ def _hang(*a, **k):
     _tries.append(k.get("timeout"))
     raise _rq.Timeout()
 _orig_post = ai.requests.post
+class _R:
+    def __init__(self, code, data): self.status_code = code; self._d = data; self.text = str(data)
+    def json(self): return self._d
+ai.requests.get = lambda *a, **k: _R(200, {"models": [
+    {"name": "models/gemini-flash-latest", "supportedGenerationMethods": ["generateContent"]},
+    {"name": "models/gemini-3.6-flash", "supportedGenerationMethods": ["generateContent"]},
+    {"name": "models/gemini-3.1-flash-lite", "supportedGenerationMethods": ["generateContent"]},
+    {"name": "models/gemini-3.1-flash-image", "supportedGenerationMethods": ["generateContent"]}]})
+cands = ai._candidates()
+assert cands[0] == "gemini-flash-latest" and "gemini-3.6-flash" in cands and "gemini-3.1-flash-image" not in cands, cands
+_used = []
+def _busy(url, **k):
+    _used.append(url.split("/models/")[1].split(":")[0])
+    if len(_used) == 1:
+        return _R(503, {"error": {"code": 503, "message": "high demand"}})
+    return _R(200, {"candidates": [{"content": {"parts": [{"text": "Привет"}]}}]})
+ai.requests.post = _busy
+assert ai.generate("тест") == "Привет" and len(_used) == 2, _used
 ai.requests.post = _hang
 try:
     ai.generate("тест")

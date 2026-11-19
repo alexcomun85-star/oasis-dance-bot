@@ -4,6 +4,8 @@
 """
 import logging
 import os
+import re
+import time
 
 import requests
 
@@ -12,6 +14,7 @@ import config
 logger = logging.getLogger(__name__)
 
 API = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+API_LIST = "https://generativelanguage.googleapis.com/v1beta/models"
 FALLBACK_MODELS = ["gemini-flash-latest", "gemini-flash-lite-latest"]
 KNOWLEDGE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "knowledge.md")
 
@@ -105,6 +108,44 @@ def generate(message: str, history: list = None) -> str:
     return _call(_system_prompt(), contents, temperature=0.5, max_tokens=2048)
 
 
+_models_cache = {"time": 0, "list": []}
+_SKIP = ("image", "tts", "audio", "live", "embedding", "aqa", "learnlm", "robotics", "computer")
+
+
+def _available_models():
+    """Список flash-моделей, доступных ключу, в порядке предпочтения. Обновляется раз в 6 часов."""
+    if time.time() - _models_cache["time"] < 6 * 3600 and _models_cache["list"]:
+        return _models_cache["list"]
+    names = []
+    try:
+        r = requests.get(API_LIST, params={"key": config.GEMINI_API_KEY, "pageSize": 200}, timeout=(5, 15))
+        for m in r.json().get("models", []):
+            name = m.get("name", "").replace("models/", "")
+            if ("generateContent" in m.get("supportedGenerationMethods", []) and "flash" in name
+                    and not any(x in name for x in _SKIP)):
+                names.append(name)
+    except Exception as e:
+        logger.error("Не удалось получить список моделей Gemini: %s", e)
+
+    def rank(n):
+        return ("lite" in n, "preview" in n or "exp" in n, not n.endswith("-latest"),
+                [-int(x) for x in re.findall(r"\d+", n)][:3])
+    names.sort(key=rank)
+    _models_cache.update(time=time.time(), list=names)
+    return names
+
+
+def _candidates():
+    found = _available_models()
+    order = [config.GEMINI_MODEL] + FALLBACK_MODELS + found
+    seen, result = set(), []
+    for m in order:
+        if m not in seen and (not found or m in found or m == config.GEMINI_MODEL):
+            seen.add(m)
+            result.append(m)
+    return result[:5]
+
+
 # Запас токенов большой: новые модели Gemini тратят часть лимита на «размышления», длину задаёт промпт.
 def _call(system: str, contents: list, temperature: float, max_tokens: int) -> str:
     body = {
@@ -112,14 +153,16 @@ def _call(system: str, contents: list, temperature: float, max_tokens: int) -> s
         "contents": contents,
         "generationConfig": {"temperature": temperature, "maxOutputTokens": max_tokens},
     }
-
-    models = [config.GEMINI_MODEL] + [m for m in FALLBACK_MODELS if m != config.GEMINI_MODEL]
-    for model in models:
+    started = time.time()
+    for model in _candidates():
+        if time.time() - started > 40:
+            break  # не держим клиента дольше 40 секунд в сумме
         try:
             r = requests.post(API.format(model=model), params={"key": config.GEMINI_API_KEY},
                               json=body, timeout=(5, 30))
             if r.status_code != 200:
-                logger.error("Gemini %s: %s %s", model, r.status_code, r.text[:300])
+                # 503 — модель перегружена, 429 — лимит, 404 — модели нет: пробуем следующую
+                logger.warning("Gemini %s: %s %s", model, r.status_code, r.text[:200].replace("\n", " "))
                 continue
             parts = r.json().get("candidates", [{}])[0].get("content", {}).get("parts", [])
             text = "".join(p.get("text", "") for p in parts).strip()
@@ -127,7 +170,7 @@ def _call(system: str, contents: list, temperature: float, max_tokens: int) -> s
                 return text.replace("**", "")
         except requests.Timeout:
             logger.error("Gemini %s не ответил за 30 секунд", model)
-            break  # сеть или сервис тормозят — не заставляем клиента ждать ещё и запасную модель
+            break  # сеть или сервис тормозят — не заставляем клиента ждать ещё
         except Exception as e:
             logger.error("Ошибка Gemini %s: %s", model, e)
     raise RuntimeError("Gemini не вернул ответ")
