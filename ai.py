@@ -159,7 +159,15 @@ def _call(system: str, contents: list, temperature: float, max_tokens: int,
         "generationConfig": {"temperature": temperature, "maxOutputTokens": max_tokens},
     }
     started = time.time()
-    for model in (_candidates() if config.GEMINI_API_KEY else []):
+    models = _candidates() if config.GEMINI_API_KEY else []
+    # После круга по всем моделям — ещё одна попытка с первыми двумя через паузу
+    attempts = models + (["_pause"] + models[:2] if len(models) > 1 else [])
+    for model in attempts:
+        if model == "_pause":
+            if time.time() - started > total_limit - 15:
+                break
+            time.sleep(3)
+            continue
         if time.time() - started > total_limit:
             break  # не держим человека дольше заданного времени в сумме
         try:
@@ -195,6 +203,8 @@ _fallback_model = {"name": None}
 def _fallback_model_name():
     if config.AI_FALLBACK_MODEL != "auto":
         return config.AI_FALLBACK_MODEL
+    if "openrouter.ai" in config.AI_FALLBACK_URL:
+        return "openrouter/free"  # бесплатный маршрутизатор OpenRouter сам выбирает свободную модель
     if _fallback_model["name"]:
         return _fallback_model["name"]
     name = "gpt-4o-mini"
