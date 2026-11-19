@@ -40,7 +40,7 @@ ABTN_SETTINGS = "⚙️ Настройки"
 ABTN_TO_CLIENT = "👀 Как видит клиент"
 BTN_TO_MANAGER = "🧑‍💼 Вернуться в меню менеджера"
 
-ADMIN_BUTTONS = {ABTN_ORDERS: "adm_menu", ABTN_CAL: "adm_cal", ABTN_POST: "ch_menu", ABTN_SOURCES: "src_menu",
+ADMIN_BUTTONS = {ABTN_ORDERS: "home", ABTN_CAL: "adm_cal", ABTN_POST: "ch_menu", ABTN_SOURCES: "src_menu",
                  ABTN_STATS: "adm_stats", ABTN_SETTINGS: "adm_settings"}
 
 MANAGER_REPLY_KB = {

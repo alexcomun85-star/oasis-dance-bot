@@ -72,6 +72,10 @@ def card_text(order) -> str:
                      "бот сам ответит ему.</i>")
     if order["data"].get("answer"):
         lines.append(f"<b>Ответ клиенту:</b> дата {order['data']['answer']}")
+    import crm
+    extra = crm.card_lines(order)
+    if extra:
+        lines += [""] + extra
     return "\n".join(lines)
 
 
@@ -96,7 +100,9 @@ def card_kb(order, from_list: str = None):
     else:
         rows.append([{"text": "↩️ Вернуть в работу", "callback_data": f"adm_st_{oid}_work"}])
     import calendar_ics
+    import crm
     rows.append([{"text": "💬 Написать клиенту", "callback_data": f"adm_msg_{oid}"}])
+    rows += crm.card_rows(order)
     rows += calendar_ics.calendar_buttons(order)
     geo = (order.get("data") or {}).get("event_geo")
     if geo:
@@ -210,6 +216,8 @@ def stats_screen():
     o_m = storage.count_orders(real, month, "form") + storage.count_orders(real, month, "callback")
     ab_m = storage.count_orders(None, month, "abandoned")
     done = storage.count_orders(["done"])
+    import crm
+    crm_lines = crm.stats_lines()
     ai_w = storage.count_events("ai", week)
     from_ch = storage.count_events("src_channel", month)
     conv = f"{o_m / new_m * 100:.0f}%" if new_m else "—"
@@ -220,6 +228,7 @@ def stats_screen():
             f"⏳ Брошенных за 30 дней: {ab_m}\n"
             f"✅ Выполнено всего: {done}\n"
             f"📈 Заявок на нового пользователя (30 дн.): {conv}\n\n"
+            + ("\n".join(crm_lines) + "\n\n" if crm_lines else "") +
             f"📢 Пришли из канала за 30 дней: {from_ch}\n"
             f"🤖 Вопросов ассистенту за 7 дней: {ai_w}")
     return text, {"inline_keyboard": [[{"text": "🗂 Кабинет", "callback_data": "adm_menu"}]]}
@@ -260,6 +269,23 @@ def handle_callback(chat_id, message_id, data: str):
         import extras
         extras.export_orders(chat_id)
         return None
+    if data.startswith("crm_"):
+        import crm
+        parts = data.split("_")
+        oid = int(parts[2])
+        if parts[1] == "note":
+            crm.start_input(chat_id, "note", oid)
+        elif parts[1] == "sum":
+            crm.start_input(chat_id, "amount", oid)
+        elif parts[1] == "rem":
+            return f"⏰ Когда напомнить про заявку №{oid}?", crm.reminder_options(oid)
+        elif parts[1] == "remset":
+            note = crm.set_reminder(chat_id, oid, parts[3])
+            order = storage.get_order(oid)
+            return note + "\n\n" + card_text(order), card_kb(order, "work")
+        elif parts[1] == "tpl":
+            crm.send_template(chat_id, oid, int(parts[3]))
+        return None
     if data.startswith("adm_df_"):
         import extras
         _, _, oid, free = data.split("_")
@@ -288,7 +314,12 @@ def handle_callback(chat_id, message_id, data: str):
         if status == "done":
             import extras
             extras.ask_review(oid)  # клиенту — просьба оценить выступление
+            n_done = storage.count_orders(["done"])
+            tg.send_message(chat_id, f"🎉 Отлично, заявка №{oid} выполнена! Это уже {n_done}-е выступление в боте. "
+                                     "Клиенту отправлена просьба оставить отзыв 💛")
         if status == "work":
+            import crm
+            crm.mark_taken(oid)
             notify_client_in_work(oid)
         order = storage.get_order(oid)
         is_notification = any(m["admin_id"] == chat_id and m["message_id"] == message_id
@@ -301,8 +332,10 @@ def handle_callback(chat_id, message_id, data: str):
         oid = int(data.split("_")[2])
         with _lock:
             _reply_to[chat_id] = oid
-        tg.send_message(chat_id, f"✍️ Напишите сообщение клиенту по заявке №{oid}.\n"
-                                 "Бот перешлёт его от имени шоу-балета. Отмена — /cancel")
+        import crm
+        tg.send_message(chat_id, f"✍️ Ответ клиенту по заявке №{oid}\n\n"
+                                 "Выберите готовый текст — он уйдёт сразу. Или напишите своё сообщение: "
+                                 "бот перешлёт его от имени шоу-балета. Отмена — /cancel", crm.templates_kb(oid))
         return None
     return None
 
@@ -330,7 +363,9 @@ def send_to_client(admin_id, text: str):
                             {"inline_keyboard": [[{"text": "↩️ Ответить менеджеру", "callback_data": f"cli_rep_{oid}"}]]})
     if r and r.get("ok"):
         if order["status"] == "new":
+            import crm
             storage.set_status(oid, "work")
+            crm.mark_taken(oid)
             _refresh_cards(oid)
         tg.send_message(admin_id, f"✅ Отправлено клиенту по заявке №{oid}.",
                         {"inline_keyboard": [[{"text": "📄 Открыть заявку", "callback_data": f"adm_open_{oid}_work"}]]})

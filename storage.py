@@ -31,6 +31,8 @@ CREATE TABLE IF NOT EXISTS ai_history (
     chat_id INTEGER PRIMARY KEY, history TEXT, updated REAL);
 CREATE TABLE IF NOT EXISTS events (
     ts REAL, chat_id INTEGER, kind TEXT);
+CREATE TABLE IF NOT EXISTS reminders (
+    order_id INTEGER, admin_id INTEGER, due REAL, done INTEGER DEFAULT 0);
 CREATE TABLE IF NOT EXISTS settings (
     key TEXT PRIMARY KEY, value TEXT);
 CREATE TABLE IF NOT EXISTS seen (

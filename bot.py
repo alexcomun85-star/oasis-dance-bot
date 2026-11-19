@@ -44,6 +44,7 @@ for _h in logging.getLogger().handlers:
 
 import admin  # noqa: E402
 import calendar_ics  # noqa: E402
+import crm  # noqa: E402
 import extras  # noqa: E402
 import ui  # noqa: E402
 import channel  # noqa: E402
@@ -142,7 +143,8 @@ def manager_mode(chat_id) -> bool:
 
 def to_manager(chat_id, user):
     storage.set_setting(f"mode_{chat_id}", "manager")
-    tg.send_message(chat_id, admin.manager_welcome(user), ui.manager_kb(tg.split_mode()))
+    tg.send_message(chat_id, "🧑‍💼 <b>Меню менеджера</b> — кнопки внизу экрана 👇", ui.manager_kb(tg.split_mode()))
+    tg.send_message(chat_id, *crm.home(user))
 
 
 def to_client_preview(chat_id, user):
@@ -150,9 +152,11 @@ def to_client_preview(chat_id, user):
     send_welcome(chat_id, user, ui.CLIENT_PREVIEW_KB)
 
 
-def manager_button(chat_id, text):
+def manager_button(chat_id, text, user=None):
     key = ui.ADMIN_BUTTONS[text]
-    if key.startswith("adm_"):
+    if key == "home":
+        res = crm.home(user or {})
+    elif key.startswith("adm_"):
         res = admin.handle_callback(chat_id, None, key)
     elif key == "ch_menu":
         res = channel.start(chat_id)
@@ -370,6 +374,7 @@ def on_command(chat_id, user, cmd):
         return [("Это раздел для клиентов. Чтобы посмотреть его, нажмите «👀 Как видит клиент».", None)]
     if cmd == "/cancel":
         channel.cancel(chat_id)
+        crm.cancel(chat_id)
         return cancel_all(chat_id)
     if cmd == "/help":
         return help_screen(chat_id)
@@ -511,9 +516,12 @@ def on_message(msg):
             return
         if manager_mode(chat_id):
             if text in ui.ADMIN_BUTTONS:
-                manager_button(chat_id, text)
+                crm.cancel(chat_id)
+                manager_button(chat_id, text, user)
+            elif crm.awaiting(chat_id):
+                crm.process_input(chat_id, text)  # заметка или сумма к заявке
             else:
-                tg.send_message(chat_id, MANAGER_HINT, ui.manager_kb(tg.split_mode()))
+                tg.send_message(chat_id, *crm.search_screen(text))  # любой текст — поиск по заявкам
             return
 
     # Кнопки нижнего меню работают всегда (незаконченная заявка сохраняется)
@@ -610,7 +618,7 @@ def on_callback(cq):
         return
     storage.touch_user(user)
 
-    if data.startswith("adm_"):
+    if data.startswith(("adm_", "crm_")):
         if not staff(chat_id):
             tg.answer_callback(cq["id"], "Недоступно")
             return
@@ -769,6 +777,8 @@ def background():
         try:
             admin.check_abandoned()
             extras.morning_digest()
+            crm.check_sla()
+            crm.check_reminders()
         except Exception:
             logger.error("Ошибка фоновой проверки:\n%s", traceback.format_exc())
         if time.time() >= next_sources:

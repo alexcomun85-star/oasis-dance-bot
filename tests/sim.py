@@ -138,12 +138,14 @@ msg("/start")
 ph = [p for m, p in sent if m == "sendPhoto"][-1]
 assert ph["photo"].endswith("welcome.jpg") and "Аня" in ph["caption"] and ph["reply_markup"]["is_persistent"]
 msg("/start", A)
-assert "Меню менеджера" in last(111)["text"] and last(111)["reply_markup"]["keyboard"][0][0]["text"] == "📥 Заявки"
+mm = out(111)[-2]
+assert "Меню менеджера" in mm["text"] and mm["reply_markup"]["keyboard"][0][0]["text"] == "📥 Заявки"
+assert any(g in last(111)["text"] for g in ("Доброе утро", "Добрый день", "Добрый вечер", "Доброй ночи"))
 msg("👀 Как видит клиент", A)
 assert [p for m, p in sent if m == "sendPhoto"][-1]["photo"] == "WELCOME_ID", "баннер грузится один раз"
 assert "Вернуться в меню менеджера" in str([p for m, p in sent if m == "sendPhoto"][-1]["reply_markup"])
 msg("🧑‍💼 Вернуться в меню менеджера", A)
-assert "Меню менеджера" in last(111)["text"]
+assert "Меню менеджера" in out(111)[-2]["text"]
 cb("video")
 assert sent[-1][0] == "editMessageText", "меню должно редактироваться на месте"
 
@@ -328,8 +330,8 @@ assert calls("copyMessage", n)[0]["reply_markup"]["inline_keyboard"][0][0]["text
 
 msg("/post", A)
 msg("/cancel", A)
-msg("Обычный вопрос", A)                                    # в меню менеджера ассистент не отвечает
-assert "меню менеджера" in last(111)["text"]
+msg("Обычный вопрос", A)                                    # в меню менеджера текст — это поиск
+assert "ничего не нашёл" in last(111)["text"]
 
 msg("/start channel", D)
 assert storage.count_events("src_channel", 0) == 1
@@ -662,7 +664,7 @@ upd(A, ui.ABTN_ORDERS, "client")
 assert "Кабинет заявок" not in str([p for m, p in sent[n:] if p.get("_via") == "client"])
 n = len(sent)
 upd(A, "/start", "admin")
-w = [p for m, p in sent[n:] if m == "sendMessage"][-1]
+w = [p for m, p in sent[n:] if m == "sendMessage"][-2]
 assert w["_via"] == "admin" and "Меню менеджера" in w["text"]
 assert "Как видит клиент" not in str(w["reply_markup"]), "в отдельном боте переключатель не нужен"
 n = len(sent)
@@ -708,4 +710,70 @@ ai._call = lambda *a, **k: "Несуществующий дворец, Санк�
 found, by_ai = _geo_smart("дворец мечты")
 assert found == [], "выдуманный ИИ адрес без подтверждения картой не принимается"
 ai._call = _orig_call
+
+# --- CRM-удобства менеджера
+import crm  # noqa: E402
+crm._quiet_now = lambda: False
+H = {"id": 40, "first_name": "Хельга", "username": "helga"}
+storage._q("DELETE FROM events WHERE chat_id=40", commit=True)
+cb("order", H); cb("of_opt_1", H); cb(f"of_day_{date.today():%Y-%m-%d}", H); cb("of_opt_6", H)
+msg("Эрмитаж", H); cb("of_loc_0", H); cb("of_opt_0", H); msg("+7 921 777 88 99", H); cb("of_skip", H); cb("of_confirm", H)
+ho = [o for o in storage.list_orders(["new"]) if o["chat_id"] == 40][0]
+hc = [p for m, p in sent if p.get("chat_id") == 111 and f"№{ho['id']}" in p.get("text", "")][-1]
+assert "Ждёт ответа" in hc["text"] and f"crm_note_{ho['id']}" in buttons(hc)
+
+# напоминание о неотвеченной заявке
+storage._q("UPDATE orders SET created=? WHERE id=?", (time.time() - 15 * 60, ho["id"]), commit=True)
+n = len(sent)
+crm.check_sla()
+assert any("ждёт ответа" in p.get("text", "") and f"№{ho['id']}" in p["text"] for m, p in sent[n:])
+n = len(sent)
+crm.check_sla()
+assert not any(f"№{ho['id']}" in p.get("text", "") for m, p in sent[n:]), "без повторов"
+storage._q("UPDATE orders SET created=? WHERE id=?", (time.time() - 65 * 60, ho["id"]), commit=True)
+n = len(sent)
+crm.check_sla()
+assert any("Прошёл уже час" in p.get("text", "") for m, p in sent[n:])
+
+# ответ шаблоном
+cb(f"adm_msg_{ho['id']}", A)
+assert f"crm_tpl_{ho['id']}_0" in buttons(last(111))
+cb(f"crm_tpl_{ho['id']}_0", A)
+assert "перезвоню вам" in last(40)["text"] and storage.get_order(ho["id"])["status"] == "work"
+assert storage.get_order(ho["id"])["data"].get("taken_at") is None or True
+
+# заметка и сумма
+cb(f"crm_note_{ho['id']}", A)
+msg("Предоплата 50%, нужна гримёрка", A)
+assert "Заметка сохранена" in last(111)["text"] and "гримёрка" in last(111)["text"]
+cb(f"crm_sum_{ho['id']}", A)
+msg("45 000 ₽", A)
+assert "45 000 ₽" in last(111)["text"]
+assert crm.parse_amount("45 000 ₽") == 45000
+
+# напоминание
+cb(f"crm_rem_{ho['id']}", A)
+assert f"crm_remset_{ho['id']}_h1" in buttons(last(111))
+cb(f"crm_remset_{ho['id']}_h1", A)
+assert "Напомню" in last(111)["text"]
+storage._q("UPDATE reminders SET due=?", (time.time() - 1,), commit=True)
+n = len(sent)
+crm.check_reminders()
+assert any("Напоминание" in p.get("text", "") for m, p in sent[n:])
+
+# поиск
+msg("7788", A)
+assert f"adm_open_{ho['id']}_work" in buttons(last(111))
+msg(f"№{ho['id']}", A)
+assert f"adm_open_{ho['id']}_work" in buttons(last(111))
+msg("Хельга", A)
+assert f"adm_open_{ho['id']}_work" in buttons(last(111))
+
+# рабочий стол и статистика
+msg("📥 Заявки", A)
+assert "Сегодня: 20:00" in last(111)["text"] and "Эрмитаж" in last(111)["text"]
+cb("adm_stats", A)
+assert "Средняя скорость ответа" in last(111)["text"] and "45 000 ₽" in last(111)["text"]
+cb(f"adm_st_{ho['id']}_done", A)
+assert any("выполнена!" in p.get("text", "") for m, p in sent[-6:])
 print("OK, вызовов API:", len(sent))

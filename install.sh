@@ -13,7 +13,7 @@ apt-get install -y -qq python3 python3-venv python3-pip >/dev/null
 echo "== 2/5 Создаю пользователя и папку =="
 id oasisbot >/dev/null 2>&1 || useradd --system --home "$APP" --shell /usr/sbin/nologin oasisbot
 mkdir -p "$APP/data"
-for f in bot.py config.py tg.py ai.py order_form.py admin.py storage.py channel.py sources.py ui.py extras.py calendar_ics.py geo.py \
+for f in bot.py config.py tg.py ai.py order_form.py admin.py storage.py channel.py sources.py ui.py extras.py calendar_ics.py geo.py crm.py \
          knowledge.md numbers.json requirements.txt; do
   cp "$SRC/$f" "$APP/"
 done
