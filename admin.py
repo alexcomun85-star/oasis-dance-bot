@@ -128,7 +128,8 @@ def menu_screen():
          {"text": f"🔄 В работе ({n_work})", "callback_data": "adm_list_work_0"}],
         [{"text": "📁 Закрытые", "callback_data": "adm_list_closed_0"},
          {"text": "📊 Статистика", "callback_data": "adm_stats"}],
-        [{"text": "📢 Пост в канал", "callback_data": "ch_menu"}],
+        [{"text": "📢 Пост в канал", "callback_data": "ch_menu"},
+         {"text": "🔗 Соцсети → канал", "callback_data": "src_menu"}],
     ]}
     return text, kb
 

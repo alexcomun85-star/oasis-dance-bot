@@ -29,7 +29,7 @@ logger = logging.getLogger("oasis")
 class _RedactSecrets(logging.Filter):
     """Убирает токен бота и ключ Gemini из любых строк журнала (сетевые ошибки содержат адрес запроса)."""
     def filter(self, record):
-        secrets = [s for s in (config.TELEGRAM_BOT_TOKEN, config.GEMINI_API_KEY) if s]
+        secrets = [s for s in (config.TELEGRAM_BOT_TOKEN, config.GEMINI_API_KEY, config.VK_SERVICE_TOKEN) if s]
         if secrets:
             msg = record.getMessage()
             for secret in secrets:
@@ -43,6 +43,7 @@ for _h in logging.getLogger().handlers:
 
 import admin  # noqa: E402
 import channel  # noqa: E402
+import sources  # noqa: E402
 import ai  # noqa: E402
 import order_form  # noqa: E402
 import storage  # noqa: E402
@@ -118,7 +119,8 @@ def help_screen(chat_id):
         text += "\nЛюбой вопрос можно просто написать сообщением — ответит ассистент."
     if admin.is_admin(chat_id):
         text += ("\n\n<b>Для администратора:</b>\n/admin — кабинет заявок\n/orders — новые заявки\n"
-                 "/stats — статистика\n/post — пост в канал")
+                 "/stats — статистика\n/post — пост в канал\n/sources — соцсети → канал\n"
+                 "Перешлите боту любой пост — он подготовит его для канала.")
     return [(text, back_kb())]
 
 
@@ -291,6 +293,8 @@ def on_command(chat_id, user, cmd):
             return [admin.stats_screen()]
         if cmd == "/post":
             return [channel.start(chat_id)]
+        if cmd == "/sources":
+            return [sources.status_screen()]
     return help_screen(chat_id)
 
 
@@ -309,6 +313,10 @@ def on_message(msg):
 
     # Администратор готовит пост в канал (принимаем и фото, и видео)
     if admin.is_admin(chat_id) and channel.active(chat_id) and channel.on_message(chat_id, msg):
+        return
+    # Администратор переслал пост — готовим черновик для канала
+    if (admin.is_admin(chat_id) and msg.get("forward_origin") and not admin.awaiting_reply(chat_id)
+            and sources.from_forward(chat_id, msg)):
         return
 
     # Номер, отправленный кнопкой
@@ -428,6 +436,19 @@ def on_callback(cq):
             tg.edit_message(chat_id, message_id, *res)
         return
 
+    if data.startswith(("dr_", "src_")):
+        if not admin.is_admin(chat_id):
+            tg.answer_callback(cq["id"], "Недоступно")
+            return
+        if data == "dr_noop":
+            tg.answer_callback(cq["id"])
+            return
+        tg.answer_callback(cq["id"], "Готовлю…" if data.startswith(("dr_regen", "src_bf", "src_check")) else None)
+        note = sources.handle_callback(chat_id, message_id, data)
+        if note:
+            tg.send_message(chat_id, html.escape(note))
+        return
+
     if data.startswith("cli_rep_"):
         tg.answer_callback(cq["id"])
         try:
@@ -458,7 +479,8 @@ USER_COMMANDS = [
     ("help", "Помощь"),
 ]
 ADMIN_COMMANDS = USER_COMMANDS + [("admin", "Кабинет заявок"), ("orders", "Новые заявки"),
-                                  ("stats", "Статистика"), ("post", "Пост в канал")]
+                                  ("stats", "Статистика"), ("post", "Пост в канал"),
+                                  ("sources", "Соцсети → канал")]
 DESCRIPTION = ("Шоу-балет Oasis Dance — шоу-балет премиум-класса для свадеб, корпоративов и праздников.\n\n"
                "Здесь можно оставить заявку на выступление за минуту, попросить перезвонить "
                "или задать вопрос ассистенту.")
@@ -503,11 +525,18 @@ def handle_update(upd):
 
 
 def background():
+    next_sources = time.time() + 60  # первая проверка соцсетей через минуту после запуска
     while True:
         try:
             admin.check_abandoned()
         except Exception:
             logger.error("Ошибка фоновой проверки:\n%s", traceback.format_exc())
+        if time.time() >= next_sources:
+            next_sources = time.time() + config.SOURCE_CHECK_MINUTES * 60
+            try:
+                sources.check_all()
+            except Exception:
+                logger.error("Ошибка проверки соцсетей:\n%s", traceback.format_exc())
         time.sleep(60)
 
 

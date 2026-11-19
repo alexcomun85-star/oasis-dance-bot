@@ -32,6 +32,7 @@ import admin, ai, bot, config, order_form, storage  # noqa: E402,E401
 
 ai.generate = lambda m, h=None: "Ответ <тест> & **цена**"
 ai.generate_post = lambda topic: f"Пост про {topic} <b>"
+ai.rewrite_post = lambda original, src: "Переписано: " + original.split("http")[0][:2000]
 assert config.ADMIN_CHAT_IDS == [111]
 
 U = {"id": 5, "first_name": "Аня", "username": "anya"}
@@ -248,4 +249,90 @@ msg("/start channel", D)
 assert storage.count_events("src_channel", 0) == 1
 msg("/stats", A)
 assert "из канала" in last(111)["text"]
+
+# --- соцсети → канал
+import sources  # noqa: E402
+config.VK_SERVICE_TOKEN = ""
+sources.check_all()
+assert "нет ключа" in sources.last_check["result"]
+
+VK = {"items": []}
+def fake_vk(method, **params):
+    assert method == "wall.get" and params.get("domain") == "oasis_dance_show"
+    return VK
+sources._vk = fake_vk
+config.VK_SERVICE_TOKEN = "VKSECRET"
+
+def post(i, text="", photo=True, pinned=False):
+    it = {"owner_id": -10, "id": i, "date": i, "text": text, "is_pinned": int(pinned), "attachments": []}
+    if photo:
+        it["attachments"].append({"type": "photo", "photo": {"sizes": [
+            {"url": f"small{i}", "width": 10, "height": 10}, {"url": f"big{i}", "width": 900, "height": 600}]}})
+    return it
+
+VK["items"] = [post(1, "старый пост"), post(2, "ещё старый")]
+n = len(sent)
+sources.check_all()
+note = [p for m, p in sent[n:] if m == "sendMessage" and p["chat_id"] == 111][-1]
+assert "Подключена страница" in note["text"] and "src_bf_0" in buttons(note)
+assert not [p for m, p in sent[n:] if m in ("sendPhoto",)], "старые посты не переносим"
+
+VK["items"].append(post(3, "Выступление в субботу! Билеты https://example.com/tickets"))
+n = len(sent)
+sources.check_all()
+ph = [p for m, p in sent[n:] if m == "sendPhoto"]
+assert ph and ph[0]["chat_id"] == 111 and ph[0]["photo"] == "big3"
+cap = ph[0]["caption"]
+assert "Переписано: Выступление" in cap and "https://example.com/tickets" in cap and "vk.com/wall-10_3" in cap
+did = int([b for b in buttons(ph[0]) if b.startswith("dr_pub_")][0][7:])
+n = len(sent)
+cb(f"dr_pub_{did}", U)                                    # не администратор
+assert not [p for m, p in sent[n:] if m == "sendPhoto"]
+cb(f"dr_pub_{did}", A)
+pub = [p for m, p in sent[n:] if m == "sendPhoto" and p["chat_id"] == "@oasis_dance_show"]
+assert pub and "start=channel" in str(pub[0]["reply_markup"])
+assert storage.get_draft(did)["status"] == "published"
+n = len(sent)
+cb(f"dr_pub_{did}", A)
+assert not [p for m, p in sent[n:] if m == "sendPhoto"], "повторно не публикуем"
+cb(f"dr_del_{did}", A)
+assert any(m == "deleteMessage" for m, _ in sent[n:])
+
+n = len(sent)
+cb("src_bf_0", A); cb("src_bf_0", A)
+assert len([p for m, p in sent[n:] if m == "sendPhoto"]) == 2, "черновики из прошлого без повторов"
+
+VK["items"].append(post(4, "Очень длинный текст. " * 80))
+n = len(sent)
+sources.check_all()
+long_ = [p for m, p in sent[n:] if m == "sendMessage" and "Очень длинный" in p["text"]]
+assert long_ and len(long_[0]["text"]) > 1024
+
+config.AUTO_PUBLISH = True
+VK["items"].append(post(5, "Сразу в канал", photo=False))
+n = len(sent)
+sources.check_all()
+assert any(p["chat_id"] == "@oasis_dance_show" and "Сразу в канал" in p["text"] for m, p in sent[n:] if m == "sendMessage")
+assert any("Опубликовано в канале" in p.get("text", "") for m, p in sent[n:] if m == "sendMessage")
+config.AUTO_PUBLISH = False
+
+def broken(method, **params):
+    raise RuntimeError("VK 5: User authorization failed")
+sources._vk = broken
+sources.check_all()
+assert "ошибки" in sources.last_check["result"]
+
+n = len(sent)
+msg("Вот пост", A, forward_origin={"type": "channel", "chat": {"username": "some"}, "message_id": 9}, message_id=900)
+fw = [p for m, p in sent[n:] if m == "sendMessage" and "Переписано: Вот пост" in p.get("text", "")]
+assert fw and "t.me/some/9" in fw[0]["text"]
+n = len(sent)
+msg("Чужой пост", U, forward_origin={"type": "user"}, message_id=901)
+assert not any("Переписано" in p.get("text", "") for m, p in sent[n:]), "пересылка работает только у администратора"
+
+buf2 = io.StringIO(); h2 = logging.StreamHandler(buf2); h2.addFilter(bot._RedactSecrets())
+logging.getLogger().addHandler(h2); logging.getLogger("t").error("token=VKSECRET")
+assert "VKSECRET" not in buf2.getvalue()
+msg("/sources", A)
+assert "Источники постов" in last(111)["text"]
 print("OK, вызовов API:", len(sent))

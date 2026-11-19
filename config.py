@@ -61,6 +61,15 @@ ABANDON_MINUTES = int(os.environ.get("ABANDON_MINUTES", "30"))
 # Название оператора персональных данных для текста согласия
 OPERATOR_NAME = os.environ.get("OPERATOR_NAME", "шоу-балет Oasis Dance")
 
+# --- Источники постов для канала ---
+# Сервисный ключ приложения ВКонтакте (dev.vk.com → ваше приложение → «Сервисный ключ доступа»)
+VK_SERVICE_TOKEN = os.environ.get("VK_SERVICE_TOKEN", "")
+# Страницы ВК через запятую: короткое имя (oasis_dance_show), id человека (id123) или группы (-123)
+VK_SOURCES = [x.strip() for x in os.environ.get("VK_SOURCES", "oasis_dance_show").split(",") if x.strip()]
+SOURCE_CHECK_MINUTES = int(os.environ.get("SOURCE_CHECK_MINUTES", "20"))
+# 1 — публиковать в канал сразу, 0 — сначала присылать черновик администратору на одобрение
+AUTO_PUBLISH = os.environ.get("AUTO_PUBLISH", "0") == "1"
+
 # --- Файлы данных ---
 DATA_DIR = os.environ.get(
     "DATA_DIR", os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")

@@ -31,6 +31,11 @@ CREATE TABLE IF NOT EXISTS ai_history (
     chat_id INTEGER PRIMARY KEY, history TEXT, updated REAL);
 CREATE TABLE IF NOT EXISTS events (
     ts REAL, chat_id INTEGER, kind TEXT);
+CREATE TABLE IF NOT EXISTS seen (
+    source TEXT, item_id TEXT, PRIMARY KEY (source, item_id));
+CREATE TABLE IF NOT EXISTS drafts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, source TEXT, item_id TEXT, link TEXT, original TEXT,
+    text TEXT, media_type TEXT, media TEXT, status TEXT, created REAL, channel_msg_id INTEGER);
 """)
 _db.commit()
 
@@ -216,3 +221,43 @@ def migrate_jsonl(path):
                 continue
     os.rename(path, path + ".imported")
     return n
+
+
+# ---------- источники постов (ВКонтакте, пересылка) ----------
+
+def is_seen(source, item_id) -> bool:
+    return _q("SELECT 1 FROM seen WHERE source=? AND item_id=?", (source, str(item_id)), one=True) is not None
+
+
+def mark_seen(source, item_id):
+    _q("INSERT OR IGNORE INTO seen(source, item_id) VALUES(?,?)", (source, str(item_id)), commit=True)
+
+
+def source_known(source) -> bool:
+    return _q("SELECT 1 FROM seen WHERE source=? LIMIT 1", (source,), one=True) is not None
+
+
+def add_draft(source, item_id, link, original, text, media_type, media) -> int:
+    return _q("""INSERT INTO drafts(source, item_id, link, original, text, media_type, media, status, created)
+                 VALUES(?,?,?,?,?,?,?,?,?)""",
+              (source, str(item_id), link, original, text, media_type, media, "pending", time.time()), commit=True)
+
+
+def get_draft(draft_id):
+    r = _q("SELECT * FROM drafts WHERE id=?", (draft_id,), one=True)
+    return dict(r) if r else None
+
+
+def update_draft(draft_id, **fields):
+    keys = [k for k in fields if k in ("text", "status", "channel_msg_id")]
+    if keys:
+        _q(f"UPDATE drafts SET {', '.join(k + '=?' for k in keys)} WHERE id=?",
+           (*[fields[k] for k in keys], draft_id), commit=True)
+
+
+def has_draft(source, item_id) -> bool:
+    return _q("SELECT 1 FROM drafts WHERE source=? AND item_id=?", (source, str(item_id)), one=True) is not None
+
+
+def count_drafts(status) -> int:
+    return _q("SELECT COUNT(*) c FROM drafts WHERE status=?", (status,), one=True)["c"]
