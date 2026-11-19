@@ -72,6 +72,8 @@ FEED_SOURCES = [x.strip() for x in os.environ.get(
     "https://raw.githubusercontent.com/alexcomun85-star/oasis-dance-bot/main/feeds/instagram.json").split(",") if x.strip()]
 # Пометка к постам из Instagram (пусто — без пометки)
 INSTAGRAM_NOTE = os.environ.get("INSTAGRAM_NOTE", "Instagram принадлежит компании Meta, признанной экстремистской и запрещённой в РФ.")
+# Как готовить посты из соцсетей: copy — текст как в оригинале + ссылка; ai — ИИ переписывает (меняется кнопкой в /sources)
+POST_MODE = os.environ.get("POST_MODE", "copy")
 SOURCE_CHECK_MINUTES = int(os.environ.get("SOURCE_CHECK_MINUTES", "20"))
 # 1 — публиковать в канал сразу, 0 — сначала присылать черновик администратору на одобрение
 AUTO_PUBLISH = os.environ.get("AUTO_PUBLISH", "0") == "1"

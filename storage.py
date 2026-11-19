@@ -31,6 +31,8 @@ CREATE TABLE IF NOT EXISTS ai_history (
     chat_id INTEGER PRIMARY KEY, history TEXT, updated REAL);
 CREATE TABLE IF NOT EXISTS events (
     ts REAL, chat_id INTEGER, kind TEXT);
+CREATE TABLE IF NOT EXISTS settings (
+    key TEXT PRIMARY KEY, value TEXT);
 CREATE TABLE IF NOT EXISTS seen (
     source TEXT, item_id TEXT, PRIMARY KEY (source, item_id));
 CREATE TABLE IF NOT EXISTS drafts (
@@ -261,3 +263,15 @@ def has_draft(source, item_id) -> bool:
 
 def count_drafts(status) -> int:
     return _q("SELECT COUNT(*) c FROM drafts WHERE status=?", (status,), one=True)["c"]
+
+
+# ---------- настройки, которые меняются кнопками ----------
+
+def get_setting(key, default=None):
+    r = _q("SELECT value FROM settings WHERE key=?", (key,), one=True)
+    return r["value"] if r else default
+
+
+def set_setting(key, value):
+    _q("INSERT INTO settings(key, value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+       (key, str(value)), commit=True)

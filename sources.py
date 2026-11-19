@@ -85,14 +85,21 @@ def vk_posts(src: str, count=10):
 
 # ---------- подготовка поста ----------
 
-def _compose(original: str, source_name: str, link: str, extra_links=()) -> str:
-    """Текст поста в HTML: переписанный ИИ текст + потерянные ссылки + ссылка на оригинал."""
+def post_mode() -> str:
+    return storage.get_setting("post_mode", config.POST_MODE)
+
+
+def _compose(original: str, source_name: str, link: str, extra_links=(), force_ai=False) -> str:
+    """Текст поста в HTML: текст оригинала (или переписанный ИИ) + потерянные ссылки + ссылка на оригинал."""
     body = ""
     if original.strip():
-        try:
-            body = ai.rewrite_post(original, source_name) if ai.is_available() else original
-        except Exception as e:
-            logger.error("ИИ не переписал пост: %s", e)
+        if (force_ai or post_mode() == "ai") and ai.is_available():
+            try:
+                body = ai.rewrite_post(original, source_name)
+            except Exception as e:
+                logger.error("ИИ не переписал пост: %s", e)
+                body = original
+        else:
             body = original
     body = body.replace("**", "").strip()
     # Ссылки из оригинала, которые ИИ мог потерять, — добавляем отдельно
@@ -127,11 +134,11 @@ def _send(chat_id, draft, reply_markup):
 
 
 def _draft_kb(did):
-    return {"inline_keyboard": [
-        [{"text": "✅ Опубликовать", "callback_data": f"dr_pub_{did}"}],
-        [{"text": "🔁 Другой вариант", "callback_data": f"dr_regen_{did}"},
-         {"text": "⏭ Пропустить", "callback_data": f"dr_skip_{did}"}],
-    ]}
+    second = [{"text": "⏭ Пропустить", "callback_data": f"dr_skip_{did}"}]
+    if ai.is_available():
+        second.insert(0, {"text": "🤖 Переписать ИИ" if post_mode() != "ai" else "🔁 Другой вариант",
+                          "callback_data": f"dr_regen_{did}"})
+    return {"inline_keyboard": [[{"text": "✅ Опубликовать", "callback_data": f"dr_pub_{did}"}], second]}
 
 
 def _show_draft(did, header):
@@ -349,6 +356,10 @@ def handle_callback(admin_id, message_id, data):
             return "Источник не найден"
         n = check_feed(url, backfill=3)
         return f"Готовлю черновики: {n}"
+    if data == "src_mode":
+        storage.set_setting("post_mode", "copy" if post_mode() == "ai" else "ai")
+        tg.edit_message(admin_id, message_id, *status_screen())
+        return None
     if data == "src_menu":
         tg.edit_message(admin_id, message_id, *status_screen())
         return None
@@ -387,7 +398,7 @@ def handle_callback(admin_id, message_id, data):
         tg.typing(admin_id)
         name = ("ВКонтакте" if d["source"].startswith("vk:") else
                 _name_for(d["link"], "Telegram") if d["source"].startswith("feed:") else "Telegram")
-        storage.update_draft(did, text=_compose(d["original"], name, d["link"]))
+        storage.update_draft(did, text=_compose(d["original"], name, d["link"], force_ai=True))
         tg.call("editMessageReplyMarkup", {"chat_id": admin_id, "message_id": message_id,
                                            "reply_markup": done_kb("🔁 Заменён новым вариантом")})
         r = _send(admin_id, storage.get_draft(did), _draft_kb(did))
@@ -412,11 +423,14 @@ def status_screen():
             f"Страницы: {html.escape(', '.join(config.VK_SOURCES) or '—')}\n"
             f"Проверка каждые {config.SOURCE_CHECK_MINUTES} мин., последняя: {when} — {html.escape(last_check['result'])}\n"
             f"Режим: {'публиковать сразу' if config.AUTO_PUBLISH else 'черновик на одобрение'}\n"
+            f"Тексты: {'как в оригинале + ссылка' if post_mode() != 'ai' else 'ИИ переписывает + ссылка'}\n"
             f"Черновиков ждут решения: {storage.count_drafts('pending')}\n\n"
             f"Ленты (Instagram и др.): {len(config.FEED_SOURCES)}\n"
             "Личные публикации ИИ отсеивает; посты из Instagram всегда идут на одобрение.\n\n"
             "Telegram: перешлите боту любой пост — он подготовит его для канала.")
-    rows = [[{"text": "🔄 Проверить сейчас", "callback_data": "src_check"}]]
+    switch = "🤖 Включить переписывание ИИ" if post_mode() != "ai" else "📋 Брать тексты как в оригинале"
+    rows = [[{"text": "🔄 Проверить сейчас", "callback_data": "src_check"}],
+            [{"text": switch, "callback_data": "src_mode"}]]
     for i, src in enumerate(config.VK_SOURCES[:5]):
         rows.append([{"text": f"📥 3 последние из {src}"[:40], "callback_data": f"src_bf_{i}"}])
     for i, url in enumerate(config.FEED_SOURCES[:5]):

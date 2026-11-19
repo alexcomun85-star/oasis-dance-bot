@@ -255,6 +255,7 @@ import sources  # noqa: E402
 FEEDS_DEFAULT = list(config.FEED_SOURCES)
 config.FEED_SOURCES = []
 ai.is_relevant = lambda text: "Мишут" not in text
+storage.set_setting("post_mode", "ai")
 config.VK_SERVICE_TOKEN = ""
 sources.check_all()
 assert "нет ключа" in sources.last_check["result"]
@@ -375,4 +376,19 @@ FEED["R"] = """<?xml version="1.0"?><rss xmlns:media="http://search.yahoo.com/mr
 name, items = sources.feed_posts("R")
 assert name == "ВКонтакте" and [i["id"] for i in items] == ["v1", "v2"]
 assert items[0]["photo"] == "https://img/1.jpg" and items[1]["photo"] == "https://img/2.jpg" and items[1]["text"] == "Второй"
+
+# --- режим «текст как в оригинале + ссылка»
+cb("src_mode", A)
+assert sources.post_mode() == "copy" and "как в оригинале" in last(111)["text"]
+insta["items"].append({"id": "NEW3", "date": 2e9 + 2, "text": "🐉 Дракон на корпоративе https://example.com/x",
+                       "link": "https://www.instagram.com/reel/NEW3/"})
+FEED["J"] = _json.dumps(insta, ensure_ascii=False)
+n = len(sent)
+sources.check_all()
+cp = [p for m, p in sent[n:] if m == "sendMessage" and "Дракон на корпоративе" in p.get("text", "")]
+assert cp and "Переписано" not in cp[0]["text"] and "https://example.com/x" in cp[0]["text"]
+assert "reel/NEW3" in cp[0]["text"]
+did3 = int([b for b in buttons(cp[0]) if b.startswith("dr_regen_")][0][9:])
+cb(f"dr_regen_{did3}", A)
+assert "Переписано" in storage.get_draft(did3)["text"], "кнопка «Переписать ИИ» работает и в режиме оригинала"
 print("OK, вызовов API:", len(sent))
